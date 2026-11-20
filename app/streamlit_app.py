@@ -87,6 +87,27 @@ def bans_by(team_id, last_patches, half_life, vs=None):
 
 
 @st.cache_data
+def fearless_events():
+    return A.fearless_events(drafts=get_drafts())
+
+
+@st.cache_data
+def fearless_by_game(team_id, last_patches):
+    return A.fearless_by_game(team_id, last_patches, drafts=get_drafts())
+
+
+@st.cache_data
+def champion_options():
+    return A.champion_options(drafts=get_drafts())
+
+
+@st.cache_data
+def series_plan(our_id, opp_id, used_by_us, used_by_them, rule, weights, last_patches):
+    return A.series_plan(our_id, opp_id, set(used_by_us), set(used_by_them), rule=rule, n=5,
+                         weights=dict(weights), last_patches=last_patches, drafts=get_drafts())
+
+
+@st.cache_data
 def recommend_bans(our_id, opp_id, n, weights, last_patches):
     return A.recommend_bans(our_id, opp_id, n=n, weights=dict(weights), drafts=get_drafts(),
                             last_patches=last_patches)
@@ -204,9 +225,11 @@ with st.sidebar:
                                       help="Lower the score of champions our team also picks."),
         "wr_pivot": st.slider("Win-rate pivot", 0.40, 0.60, d["wr_pivot"], 0.01, key="w_wr_pivot",
                               help="Win rate at which the win-rate term is zero."),
-        "prior_games": st.slider("Smoothing (imaginary games)", 0.0, 20.0, d["prior_games"], 1.0,
+        "prior_games": st.slider("Smoothing (imaginary games)", 0.0, 30.0, d["prior_games"], 1.0,
                                  key="w_prior_games",
                                  help="Average games added to every record so a 2-0 isn't treated as 100%."),
+        "min_picks": st.slider("Minimum picks", 1, 10, int(d["min_picks"]), 1, key="w_min_picks",
+                               help="Ignore champions they picked fewer times than this in the window."),
         "half_life": half_life,
     }
 
@@ -225,7 +248,8 @@ c1.metric("Head-to-head", wl(h2h), pct_of(h2h) if h2h["games"] else "no meetings
 c2.metric(f"{our_name} overall", wl(ours), pct_of(ours), delta_color="off", delta_arrow="off")
 c3.metric(f"{opp_name} overall", wl(theirs), pct_of(theirs), delta_color="off", delta_arrow="off")
 
-tab_scout, tab_vs, tab_plan = st.tabs(["Opponent scouting", "Against us", "Ban plan"])
+tab_scout, tab_vs, tab_plan, tab_fearless = st.tabs(["Opponent scouting", "Against us", "Ban plan",
+                                                     "Fearless series"])
 
 # --- tab: opponent scouting --------------------------------------------------------------
 with tab_scout:
@@ -335,7 +359,8 @@ with tab_plan:
     recs = recommend_bans(our_id, opp_id, 5, tuple(sorted(weights.items())), last_patches)
     st.subheader(f"Top 5 bans against {opp_name}")
     if recs.empty:
-        st.info(f"No {opp_name} games in this window.")
+        st.info(f"No champion qualifies: {opp_name} has no games in this window, or none picked "
+                f"'Minimum picks' times. Lower the slider or widen the patch window.")
     else:
         n_opp = int(recs["n_opp_games"].iloc[0])
         st.caption(f"Based on {n_opp} {opp_name} games. Ranking uses the weights in the sidebar.")
@@ -358,6 +383,100 @@ with tab_plan:
                 "- **Smoothing** adds average games to every record, so a 2-0 isn't treated as unbeatable."
             )
             st.json(weights)
+
+# --- tab: fearless series ---------------------------------------------------------------------
+with tab_fearless:
+    what_this_means(f"in Fearless Draft every champion used in a series is gone for the rest of it, so by game 3 "
+                    f"{opp_name} is pushed off its comfort picks; this shows how they adapt, and what the next "
+                    f"game looks like once you mark what's already been played.")
+    ev = fearless_events()
+    fearless_ev = ev[ev["fearless"]]
+    rules = sorted(fearless_ev["rule"].unique())
+    rule = "hard" if "hard" in rules else (rules[0] if rules else "hard")
+    with st.expander(f"Which events use Fearless Draft? {len(fearless_ev)} of {len(ev)} (detected from the data)"):
+        st.caption("A champion picked again later in the same series means no Fearless. "
+                   "'hard' = no champion is ever repeated by either team; 'soft' = only by the same team.")
+        st.dataframe(ev, hide_index=True, width="stretch", column_config={
+            "event": "Event", "multi_game_series": "Multi-game series", "games": "Games",
+            "repeats_any_team": "Repeats (any team)", "repeats_same_team": "Repeats (same team)",
+            "rule": "Rule", "fearless": "Fearless"})
+
+    st.subheader(f"{opp_name} by game number (Fearless series only)")
+    fb = fearless_by_game(opp_id, last_patches)
+    summ = fb["summary"]
+    if summ["games"].sum() == 0:
+        st.info("No Fearless series games in this window.")
+    else:
+        cols = st.columns(3)
+        for col, r in zip(cols, summ.itertuples()):
+            label = {"G1": "Game 1", "G2": "Game 2", "G3+": "Game 3+"}[r.game]
+            wr = f"{r.win_rate:.0%} win rate" if r.games else "no games"
+            col.metric(f"{label}  ({r.games} games)", r.record.replace("-", "–") if r.games else "–",
+                       f"{wr} · {r.distinct_champions} different champions", delta_color="off", delta_arrow="off")
+            if r.small_sample:
+                col.markdown(":orange[Small sample]")
+        cols = st.columns(3)
+        tp = fb["top_picks"]
+        for col, g in zip(cols, ["G1", "G2", "G3+"]):
+            part = tp[tp["game"] == g]
+            col.markdown(f"**Most picked in {g}**")
+            if part.empty:
+                col.info("No games.")
+                continue
+            col.dataframe(part.assign(pick_rate=part["pick_rate"] * 100), hide_index=True, width="stretch",
+                          column_order=["champion", "role", "picks", "pick_rate"],
+                          column_config={"champion": "Champion", "role": "Role (inferred)", "picks": "Picks",
+                                         "pick_rate": st.column_config.ProgressColumn(
+                                             "Of games", format="%.0f%%", min_value=0, max_value=100)})
+        st.caption("Distinct champions = how many different champions they played in that game number. "
+                   "It rises in later games because Fearless removes the ones already used.")
+
+    st.subheader("Series planner")
+    st.caption(f"Mark the champions already played earlier in this series. Rule applied: {rule} Fearless "
+               f"({'gone for both teams' if rule == 'hard' else 'gone only for the team that played it'}).")
+    champs = champion_options()
+    p1, p2 = st.columns(2)
+    used_us = p1.multiselect(f"Used by {our_name}", list(champs.index), format_func=lambda c: champs[c],
+                             key=f"used_us_{our_id}_{opp_id}")
+    used_them = p2.multiselect(f"Used by {opp_name}", list(champs.index), format_func=lambda c: champs[c],
+                               key=f"used_them_{our_id}_{opp_id}")
+    plan = series_plan(our_id, opp_id, tuple(sorted(used_us)), tuple(sorted(used_them)), rule,
+                       tuple(sorted(weights.items())), last_patches)
+
+    lost, likely = plan["lost"], plan["likely_picks"]
+    l1, l2 = st.columns(2)
+    with l1:
+        st.markdown(f"**What {opp_name} loses**")
+        if lost.empty:
+            st.caption("Nothing yet: mark champions above.")
+        else:
+            st.metric("Share of their recent picks now unavailable", f"{plan['lost_share']:.0%}")
+            st.dataframe(lost, hide_index=True, width="stretch", column_order=["champion", "roles", "games"],
+                         column_config={"champion": "Champion", "roles": "Role(s)",
+                                        "games": st.column_config.NumberColumn("Games played", help="In the window")})
+    with l2:
+        st.markdown(f"**{opp_name}'s likely picks now**")
+        if likely.empty:
+            st.caption("No games in this window.")
+        else:
+            st.dataframe(likely.assign(weighted_pick_rate=likely["weighted_pick_rate"] * 100), hide_index=True,
+                         width="stretch", column_order=["champion", "roles", "games", "weighted_pick_rate"],
+                         column_config={"champion": "Champion", "roles": "Role(s)", "games": "Games played",
+                                        "weighted_pick_rate": st.column_config.ProgressColumn(
+                                            "Recent pick rate", format="%.0f%%", min_value=0, max_value=100)})
+
+    st.markdown("**Ban plan for the next game**")
+    bans = plan["bans"]
+    if bans.empty:
+        st.info("No champions qualify. Lower 'Minimum picks' or widen the patch window.")
+    else:
+        rank = 1
+        for chunk in [bans.iloc[:3], bans.iloc[3:]]:
+            cols = st.columns(3)
+            for col, r in zip(cols, chunk.itertuples()):
+                with col:
+                    ban_card(rank, r)
+                rank += 1
 
 # --- footer --------------------------------------------------------------------------------
 st.divider()

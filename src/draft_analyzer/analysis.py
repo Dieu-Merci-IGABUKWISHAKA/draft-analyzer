@@ -134,7 +134,7 @@ def champion_pool(team_id: str, last_patches: int | None = None, half_life: floa
     picks = df[(df["team_id"] == team_id) & (df["action"] == "pick") & df["game_id"].isin(games.index)]
     picks = picks.join(games[["won", "weight"]], on="game_id")
 
-    out = picks.groupby(["champion_name", "role_inferred"], observed=True, dropna=False).agg(
+    out = picks.groupby(["champion_id", "champion_name", "role_inferred"], observed=True, dropna=False).agg(
         games=("game_id", "size"), wins=("won", "sum"), weighted_games=("weight", "sum"),
         last_played=("date", "max"), last_patch=("patch", lambda s: max(s.astype(str), key=_patch_key)),
     ).reset_index()
@@ -146,7 +146,7 @@ def champion_pool(team_id: str, last_patches: int | None = None, half_life: floa
     out["n_team_games"] = len(games)
     out["small_sample"] = out["games"] < SMALL_SAMPLE
     cols = ["champion", "role", "games", "record", "win_rate", "pick_rate", "weighted_pick_rate",
-            "last_played", "last_patch", "n_team_games", "small_sample"]
+            "last_played", "last_patch", "n_team_games", "small_sample", "champion_id", "weighted_games"]
     return out.sort_values(["weighted_games", "games"], ascending=False)[cols].reset_index(drop=True)
 
 
@@ -222,13 +222,15 @@ DEFAULT_BAN_WEIGHTS: dict[str, float] = {
     "banned_by_others": 0.25, # x rate other teams ban it against this opponent
     "our_pick_penalty": 0.5,  # positive scores x (1 - this x our own pick rate)
     "wr_pivot": 0.5,          # win rate at which the win-rate term is zero
-    "prior_games": 5.0,       # smoothing: imaginary games at the opponent's overall win rate
+    "prior_games": 10.0,      # smoothing: imaginary games at the opponent's overall win rate
+    "min_picks": 4,           # ignore champions they picked fewer times than this in the window
     "half_life": 3.0,         # patches until a game counts half
 }
 
 
 def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict[str, float] | None = None,
-                   drafts: pd.DataFrame | None = None, last_patches: int | None = None) -> pd.DataFrame:
+                   drafts: pd.DataFrame | None = None, last_patches: int | None = None,
+                   exclude: set[str] | None = None) -> pd.DataFrame:
     """Rank champions to ban against an opponent.
 
     edge  = (smoothed_wr - wr_pivot) / wr_pivot          +ve if they win on it, -ve if they lose
@@ -240,6 +242,8 @@ def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict
     gets a negative pick term: banning it would take away a champion they
     do badly with. smoothed_wr adds `prior_games` imaginary games at the
     opponent's overall win rate, so a 1-0 record isn't treated as 100%.
+    Champions picked fewer than `min_picks` times, or whose champion_id is in
+    `exclude` (e.g. already used in a Fearless series), are not ranked.
     `weights` overrides any subset of DEFAULT_BAN_WEIGHTS. last_patches limits
     both teams to their N most recent patches (on top of the half-life decay).
     """
@@ -289,6 +293,9 @@ def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict
     score = (out["weighted_pick_rate"] * (w["pick"] + w["win_rate"] * out["wr_edge"])
              + w["banned_by_others"] * out["weighted_banned_against_rate"])
     out["score"] = score.where(score <= 0, score * (1 - w["our_pick_penalty"] * out["our_pick_rate"]))
+    out = out[(out["picks"] >= w["min_picks"]) & ~out.index.isin(list(exclude or ()))]
+    if out.empty:
+        return pd.DataFrame(columns=cols)
 
     n_games, n_recent = len(games), len(recent_ids)
 
@@ -311,3 +318,133 @@ def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict
     out["n_opp_games"] = n_games
     out["n_our_games"] = len(ours)
     return out[cols]
+
+
+# --- Fearless Draft -----------------------------------------------------------------------
+# Fearless: a champion picked in one game of a series can't be picked again later in that
+# series. "hard" = by either team, "soft" = by the same team only.
+FEARLESS_ORDER = ["G1", "G2", "G3+"]
+
+
+def fearless_events(drafts: pd.DataFrame | None = None, min_series: int = 3) -> pd.DataFrame:
+    """Detect Fearless Draft per event from the picks themselves: count champions
+    re-picked later in the same multi-game series, by anyone and by the same team."""
+    df = _drafts(drafts)
+    p = df.loc[df["action"] == "pick", ["series_id", "event", "game_number", "team_id", "champion_id"]].copy()
+    p["event"] = p["event"].astype(str)
+    p = p[p.groupby("series_id")["game_number"].transform("nunique") >= 2]
+    p["repeat_any"] = p["game_number"] > p.groupby(["series_id", "champion_id"])["game_number"].transform("min")
+    p["repeat_own"] = p["game_number"] > p.groupby(["series_id", "team_id", "champion_id"])["game_number"].transform("min")
+    out = p.groupby("event").agg(multi_game_series=("series_id", "nunique"),
+                                 repeats_any_team=("repeat_any", "sum"), repeats_same_team=("repeat_own", "sum"))
+    out["games"] = p.drop_duplicates(["series_id", "game_number"]).groupby("event").size()
+    out["rule"] = "none"
+    enough = out["multi_game_series"] >= min_series
+    out.loc[enough & (out["repeats_same_team"] == 0), "rule"] = "soft"
+    out.loc[enough & (out["repeats_any_team"] == 0), "rule"] = "hard"
+    out["fearless"] = out["rule"] != "none"
+    return out.reset_index()[["event", "multi_game_series", "games", "repeats_any_team", "repeats_same_team",
+                              "rule", "fearless"]]
+
+
+def fearless_game_ids(drafts: pd.DataFrame | None = None) -> set[str]:
+    """Games in multi-game series of events detected as Fearless."""
+    df = _drafts(drafts)
+    events = fearless_events(df)
+    games = df.drop_duplicates("game_id")
+    games = games[games["event"].astype(str).isin(set(events.loc[events["fearless"], "event"]))]
+    multi = games.groupby("series_id")["game_number"].transform("nunique") >= 2
+    return set(games.loc[multi, "game_id"])
+
+
+def _bucket(game_number: pd.Series) -> pd.Series:
+    return game_number.astype(int).map(lambda g: "G1" if g == 1 else "G2" if g == 2 else "G3+")
+
+
+def fearless_by_game(team_id: str, last_patches: int | None = None, top: int = 5,
+                     drafts: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
+    """How a team drafts by game number in Fearless series.
+
+    Returns {"summary": one row per G1/G2/G3+ (games, record, win rate, distinct
+    champions, picks), "top_picks": their `top` most-picked champions per bucket}.
+    """
+    df = _drafts(drafts)
+    games = team_games(team_id, df, last_patches)
+    games = games[games.index.isin(fearless_game_ids(df))]
+    picks = df[(df["team_id"] == team_id) & (df["action"] == "pick") & df["game_id"].isin(games.index)].copy()
+    numbers = df.drop_duplicates("game_id").set_index("game_id")["game_number"]
+    games["bucket"] = _bucket(numbers.loc[games.index])
+    picks["bucket"] = _bucket(picks["game_number"])
+
+    summary = games.groupby("bucket").agg(games=("won", "size"), wins=("won", "sum")).reindex(FEARLESS_ORDER)
+    summary = summary.fillna(0).astype(int)
+    summary["record"] = _record(summary["wins"], summary["games"])
+    summary["win_rate"] = summary["wins"] / summary["games"].where(summary["games"] > 0)
+    by_bucket = picks.groupby("bucket")
+    summary["distinct_champions"] = by_bucket["champion_id"].nunique().reindex(FEARLESS_ORDER).fillna(0).astype(int)
+    summary["picks"] = by_bucket.size().reindex(FEARLESS_ORDER).fillna(0).astype(int)
+    summary["small_sample"] = summary["games"] < SMALL_SAMPLE
+    summary = summary.rename_axis("game").reset_index()
+
+    top_picks = (picks.groupby(["bucket", "champion_name", "role_inferred"], observed=True, dropna=False)
+                 .size().rename("picks").reset_index())
+    top_picks = top_picks.join(summary.set_index("game")["games"], on="bucket")
+    top_picks["pick_rate"] = top_picks["picks"] / top_picks["games"]
+    top_picks["bucket"] = pd.Categorical(top_picks["bucket"], FEARLESS_ORDER)
+    top_picks = (top_picks.sort_values(["bucket", "picks"], ascending=[True, False])
+                 .groupby("bucket", observed=True).head(top)
+                 .rename(columns={"bucket": "game", "champion_name": "champion", "role_inferred": "role"})
+                 .reset_index(drop=True))
+    return {"summary": summary, "top_picks": top_picks}
+
+
+def champion_options(drafts: pd.DataFrame | None = None) -> pd.Series:
+    """champion_id -> name for every champion in the data, sorted by name."""
+    df = _drafts(drafts)
+    return df.drop_duplicates("champion_id").set_index("champion_id")["champion_name"].astype(str).sort_values()
+
+
+def _pool_by_champion(team_id: str, last_patches, half_life, drafts) -> pd.DataFrame:
+    """champion_pool summed over roles, indexed by champion_id, with a roles column."""
+    pool = champion_pool(team_id, last_patches, half_life, drafts)
+    if pool.empty:
+        return pool.set_index("champion_id").assign(roles="")
+    pool = pool.sort_values("games", ascending=False)
+    pool["role"] = pool["role"].astype(object).fillna("?").astype(str)
+    out = pool.groupby("champion_id").agg(
+        champion=("champion", "first"), roles=("role", ", ".join), games=("games", "sum"),
+        weighted_games=("weighted_games", "sum"), weighted_pick_rate=("weighted_pick_rate", "sum"),
+        n_team_games=("n_team_games", "first"))
+    return out.sort_values(["weighted_games", "games"], ascending=False)
+
+
+def series_plan(our_team_id: str, opponent_id: str, used_by_us: set[str] | None = None,
+                used_by_them: set[str] | None = None, rule: str = "hard", n: int = 5,
+                weights: dict[str, float] | None = None, last_patches: int | None = None,
+                drafts: pd.DataFrame | None = None) -> dict:
+    """Plan the next game of a Fearless series, given the champion_ids already
+    used by each team in earlier games.
+
+    rule="hard": anything either team used is gone for both (what the data shows);
+    rule="soft": the opponent only loses what they used themselves.
+    Returns {"unavailable", "bans", "likely_picks", "lost", "lost_share"}: lost is the
+    opponent's now-unavailable champions by how much they play them; lost_share is the
+    share of their recent (weighted) picks those champions made up.
+    """
+    df = _drafts(drafts)
+    w = {**DEFAULT_BAN_WEIGHTS, **(weights or {})}
+    used_by_us, used_by_them = set(used_by_us or ()), set(used_by_them or ())
+    gone_for_them = used_by_us | used_by_them if rule == "hard" else used_by_them
+    unavailable = used_by_us | used_by_them
+
+    pool = _pool_by_champion(opponent_id, last_patches, w["half_life"], df)
+    total = pool["weighted_games"].sum() if len(pool) else 0.0
+    lost = pool[pool.index.isin(list(gone_for_them))]
+    return {
+        "unavailable": unavailable,
+        "bans": recommend_bans(our_team_id, opponent_id, n=n, weights=weights, drafts=df,
+                               last_patches=last_patches, exclude=unavailable),
+        "likely_picks": pool[~pool.index.isin(list(gone_for_them))].head(10).reset_index(),
+        "lost": lost.reset_index(),
+        "lost_share": float(lost["weighted_games"].sum() / total) if total else 0.0,
+    }
