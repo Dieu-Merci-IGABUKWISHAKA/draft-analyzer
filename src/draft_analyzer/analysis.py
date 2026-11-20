@@ -124,7 +124,7 @@ def data_summary(drafts: pd.DataFrame | None = None) -> dict:
 
 
 def _record(wins: pd.Series, games: pd.Series) -> pd.Series:
-    return wins.astype(int).astype(str) + "-" + (games - wins).astype(int).astype(str)
+    return wins.astype(int).astype(str) + "–" + (games - wins).astype(int).astype(str)
 
 
 def champion_pool(team_id: str, last_patches: int | None = None, half_life: float | None = None,
@@ -294,7 +294,7 @@ def ban_scores(stats: pd.DataFrame, ctx: dict, weights: dict[str, float] | None 
 
 def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict[str, float] | None = None,
                    drafts: pd.DataFrame | None = None, last_patches: int | None = None,
-                   exclude: set[str] | None = None) -> pd.DataFrame:
+                   exclude: set[str] | None = None, opponent_name: str = "them") -> pd.DataFrame:
     """Rank champions to ban against an opponent.
 
     edge  = (smoothed_wr - wr_pivot) / wr_pivot          +ve if they win on it, -ve if they lose
@@ -310,6 +310,11 @@ def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict
     `weights` overrides any subset of DEFAULT_BAN_WEIGHTS. last_patches limits
     both teams to their N most recent patches (on top of the half-life decay).
     Backtested walk-forward in backtest.py (docs/VALIDATION.md).
+
+    reason_lines are ordered by how much each part of the score contributes
+    (presence, win rate, banned by other teams, our own use), biggest first, so
+    the first line is the reason that drives the ranking; `drivers` holds the
+    contributions behind each line, in the same order.
     """
     unknown = set(weights or {}) - set(DEFAULT_BAN_WEIGHTS)
     if unknown:
@@ -317,7 +322,7 @@ def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict
     w = {**DEFAULT_BAN_WEIGHTS, **(weights or {})}
     cols = ["champion", "score", "picks", "wins", "record", "recent_picks", "smoothed_wr", "wr_edge",
             "weighted_pick_rate", "banned_against", "our_picks", "n_our_games", "n_opp_games",
-            "reason_lines", "reason"]
+            "reason_lines", "drivers", "reason"]
     stats, ctx = ban_stats(our_team_id, opponent_id, drafts, last_patches, w["half_life"])
     if ctx["games"].empty:
         return pd.DataFrame(columns=cols)
@@ -328,20 +333,34 @@ def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict
 
     n_games, ours = len(ctx["games"]), ctx["ours"]
 
-    def reason_lines(r) -> list[str]:
-        """Short plain-English lines; the last (optional) one is about our own use of it."""
-        lines = [f"Picked {int(r.picks)} of {n_games} games · {int(r.recent_picks)} in last {RECENT_PATCHES} patches"]
+    # What each part of the score contributes (the penalty for our own use as a negative).
+    raw = (out["weighted_pick_rate"] * (w["pick"] + w["win_rate"] * out["wr_edge"])
+           + w["banned_by_others"] * out["weighted_banned_against_rate"])
+    out["c_presence"] = out["weighted_pick_rate"] * w["pick"]
+    out["c_win_rate"] = out["weighted_pick_rate"] * w["win_rate"] * out["wr_edge"]
+    out["c_banned"] = w["banned_by_others"] * out["weighted_banned_against_rate"]
+    out["c_ours"] = out["score"] - raw
+
+    def reason_lines(r) -> tuple[list[str], list[tuple[str, float]]]:
+        """Plain-English lines, biggest contribution to the score first."""
+        items = [("presence", r.c_presence,
+                  f"Picked {int(r.picks)} of {n_games} games · {int(r.recent_picks)} in last {RECENT_PATCHES} patches")]
         if r.picks:
             wr = f"Win rate {r.wins / r.picks:.0%} ({int(r.wins)}–{int(r.picks - r.wins)})"
-            lines.append(wr + (" · small sample" if r.picks < SMALL_SAMPLE else ""))
+            items.append(("win rate", r.c_win_rate, wr + (" · small sample" if r.picks < SMALL_SAMPLE else "")))
         if r.banned_against:
-            lines.append(f"Banned vs them in {int(r.banned_against)} games")
+            items.append(("banned by others", r.c_banned,
+                          f"Banned vs {opponent_name} by other teams in {int(r.banned_against)} "
+                          f"game{'s' if int(r.banned_against) != 1 else ''}"))
         if r.our_picks:
-            lines.append(f"We pick it too ({int(r.our_picks)} of our {len(ours)} games)")
-        return lines
+            items.append(("we play it", r.c_ours, f"We pick it too ({int(r.our_picks)} of our {len(ours)} games)"))
+        items.sort(key=lambda x: -abs(x[1]))       # stable: presence first on ties
+        return [x[2] for x in items], [(x[0], float(x[1])) for x in items]
 
     out = out.sort_values("score", ascending=False).head(n).reset_index(drop=True)
-    out["reason_lines"] = out.apply(reason_lines, axis=1)
+    built = out.apply(reason_lines, axis=1)
+    out["reason_lines"] = built.map(lambda x: x[0])
+    out["drivers"] = built.map(lambda x: x[1])
     out["reason"] = out["reason_lines"].str.join(" · ")
     out["record"] = _record(out["wins"], out["picks"])
     out["n_opp_games"] = n_games
@@ -450,7 +469,7 @@ def _pool_by_champion(team_id: str, last_patches, half_life, drafts) -> pd.DataF
 def series_plan(our_team_id: str, opponent_id: str, used_by_us: set[str] | None = None,
                 used_by_them: set[str] | None = None, rule: str = "hard", n: int = 5,
                 weights: dict[str, float] | None = None, last_patches: int | None = None,
-                drafts: pd.DataFrame | None = None) -> dict:
+                drafts: pd.DataFrame | None = None, opponent_name: str = "them") -> dict:
     """Plan the next game of a Fearless series, given the champion_ids already
     used by each team in earlier games.
 
@@ -472,7 +491,7 @@ def series_plan(our_team_id: str, opponent_id: str, used_by_us: set[str] | None 
     return {
         "unavailable": unavailable,
         "bans": recommend_bans(our_team_id, opponent_id, n=n, weights=weights, drafts=df,
-                               last_patches=last_patches, exclude=unavailable),
+                               last_patches=last_patches, exclude=unavailable, opponent_name=opponent_name),
         "likely_picks": pool[~pool.index.isin(list(gone_for_them))].head(10).reset_index(),
         "lost": lost.reset_index(),
         "lost_share": float(lost["weighted_games"].sum() / total) if total else 0.0,

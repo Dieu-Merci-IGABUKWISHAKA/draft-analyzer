@@ -55,6 +55,17 @@ GRID = {
     "min_picks": [1, 2, 4],
 }
 CASES_PATH = CACHE_DIR / "ban_backtest_cases.joblib"
+# Headline 2026 result of the last full run (python src/draft_analyzer/backtest.py), shown
+# in the app; docs/VALIDATION.md has the full tables. Update both after a re-run.
+HEADLINE = {"plan_pick_rate": 0.338, "meta_pick_rate": 0.269, "naive_pick_rate": 0.198, "test_games": 439}
+
+
+def headline_caption() -> str:
+    h = HEADLINE
+    return (f"Tested on 2026 games it never saw: opponents picked a listed champion {h['plan_pick_rate']:.0%} of the "
+            f"time when left open, vs {h['meta_pick_rate']:.0%} for the meta top 5.")
+
+
 # The hand-set weights used before this backtest (Phases 0-4); the tuned ones are now
 # analysis.DEFAULT_BAN_WEIGHTS.
 PREVIOUS_BAN_WEIGHTS = {"win_rate": 3.0, "pick": 0.0, "banned_by_others": 0.25, "our_pick_penalty": 0.5,

@@ -1,0 +1,11 @@
+# Dashboard theme: calm blue accent, readable sans-serif text.
+[theme]
+base = "light"
+primaryColor = "#2E6DB4"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F6FA"
+textColor = "#1F2933"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

@@ -8,11 +8,22 @@ A draft-scouting dashboard built on GRID's official pro match data. Pick Cloud9 
 
 ## Features
 
+Tabs, in order: **Match prep**, Draft simulator, Opponent scouting, Insights, Ban plan, Fearless series, Against us.
+
+- **Match prep** (first tab): the 60-second brief before a match. It names the tab with the details for every block.
+  - **Records:** head-to-head and recent form, with the last 10 results.
+  - **What they'll draft:** their most likely first-phase picks and their phase tells.
+  - **Our ban plan:** the top 5 bans, strongest reason first.
+  - **How to beat them:** the top 3 insight cards.
+  - **Watch out:** what they ban against us and our own predictable habits.
+  - **Proof:** one line showing the tendencies were tested on unseen games.
+  - **Export pre-match report** downloads it as a one-page, text-only HTML file that prints cleanly to PDF.
 - **Opponent scouting**: champion pool by (inferred) role with W-L records, a chart and a table that hides or greys out small samples. Also priority picks: their very first pick and first-round picks, split by whether they had first pick. Plus their bans, split into phase 1 and phase 2.
 - **Against us**: what the opponent bans against Cloud9, and what Cloud9 bans against them, in head-to-head games only.
 - **Early game** (in Opponent scouting): first blood, dragon, void grub, herald and tower per game from the event feeds, with game times, by team and by jungler champion.
   - **What's listed:** only patterns that held up when re-measured on later games, namely first-tower rate and the jungler–first-grub link. Most early-game habits didn't hold up, and an expander shows every number anyway. See [docs/MACRO.md](docs/MACRO.md).
-- **Ban plan**: the top 5 recommended bans as cards. Each card gives the reason (e.g. "Picked 7 of 39 games · 3 in last 3 patches", "Win rate 86% (6–1)", "Banned vs them in 4 games"), flags small samples, and shows the score. All score weights are sidebar sliders.
+- **Ban plan**: each card leads with the reason that adds most to the score (after the 2025 tuning), and the tab shows the backtest result.
+- **Ban plan details**: the top 5 recommended bans as cards. Each card gives the reason (e.g. "Picked 7 of 39 games · 3 in last 3 patches", "Win rate 86% (6–1)", "Banned vs them in 4 games"), flags small samples, and shows the score. All score weights are sidebar sliders.
 - **Fearless series**: the opponent's record, number of different champions and most-picked champions by game number (games 1 to 5, each with its sample size; games 4 and 5 are flagged as small samples), in Fearless series only. The **series planner** takes the champions each team has already used and shows what the opponent loses, their likely picks now, and a new ban plan.
 - **Draft simulator**: play a 20-slot pro draft against the opponent:
   - **Setup:** first pick, side, game number in the series, Fearless-locked champions, and editable lineups and roles.

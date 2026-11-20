@@ -19,7 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from draft_analyzer import analysis as A  # noqa: E402
 from draft_analyzer import insights as I  # noqa: E402
 from draft_analyzer import macro as MA  # noqa: E402
+from draft_analyzer import backtest as BT  # noqa: E402
 from draft_analyzer import model as M  # noqa: E402
+from draft_analyzer import prep as P  # noqa: E402
 from draft_analyzer import simulator as S  # noqa: E402
 from draft_analyzer.config import CLOUD9_LOL_TEAM  # noqa: E402
 from draft_analyzer.drafts import load_drafts  # noqa: E402
@@ -45,6 +47,9 @@ st.markdown("""
 .chip-next {border: 2px solid #f0b400; font-weight: 600;}
 .chip-empty {color: #9aa0a6;}
 .opt-ev {font-size: 0.8rem; color: #8a8f98; line-height: 1.3;}
+.badge {display: inline-block; padding: 0 0.45rem; border-radius: 0.6rem; background: #eef2f6; color: #4a5562;
+        font-size: 0.75rem; white-space: nowrap;}
+.ban-lead {font-weight: 600;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -112,15 +117,16 @@ def champion_options():
 
 
 @st.cache_data
-def series_plan(our_id, opp_id, used_by_us, used_by_them, rule, weights, last_patches):
+def series_plan(our_id, opp_id, used_by_us, used_by_them, rule, weights, last_patches, opp_name="them"):
     return A.series_plan(our_id, opp_id, set(used_by_us), set(used_by_them), rule=rule, n=5,
-                         weights=dict(weights), last_patches=last_patches, drafts=get_drafts())
+                         weights=dict(weights), last_patches=last_patches, drafts=get_drafts(),
+                         opponent_name=opp_name)
 
 
 @st.cache_data
-def recommend_bans(our_id, opp_id, n, weights, last_patches):
+def recommend_bans(our_id, opp_id, n, weights, last_patches, opp_name="them"):
     return A.recommend_bans(our_id, opp_id, n=n, weights=dict(weights), drafts=get_drafts(),
-                            last_patches=last_patches)
+                            last_patches=last_patches, opponent_name=opp_name)
 
 
 @st.cache_resource(show_spinner="Preparing insights...")
@@ -138,7 +144,7 @@ def macro_replication() -> pd.DataFrame:
     return MA.load_replication(get_macro())
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner="Summarising the early game...")
 def macro_summary(team):
     return get_macro().summary(team, I.DEFAULT_PATCHES, replication=macro_replication())
 
@@ -149,7 +155,7 @@ def wl(rec: dict) -> str:
 
 
 def pct_of(rec: dict) -> str:
-    return f"{rec['wins'] / rec['games']:.0%} of {rec['games']} games" if rec["games"] else "-"
+    return f"{rec['wins'] / rec['games']:.0%} of {rec['games']} games" if rec["games"] else "–"
 
 
 def what_this_means(text: str) -> None:
@@ -200,14 +206,12 @@ def ban_card(rank: int, r) -> None:
     with st.container(border=True):
         name = html.escape(str(r.champion))
         st.markdown(f'<div class="ban-name" title="{name}">{rank}. {name}</div>', unsafe_allow_html=True)
-        lines = list(r.reason_lines)
-        main, ours = (lines[:-1], lines[-1]) if lines and lines[-1].startswith("We pick it") else (lines, None)
-        for line in main:
+        for i, line in enumerate(r.reason_lines):      # biggest share of the score first
             text = html.escape(line).replace(" · small sample", ' · <span class="ban-small">small sample</span>')
-            st.markdown(f'<p class="ban-line">{text}</p>', unsafe_allow_html=True)
-        caption = f"Ban score {r.score:.2f} · smoothed win rate {r.smoothed_wr:.0%}"
-        st.caption(caption + (f"  \n{ours}" if ours else ""),
-                   help="Higher = better ban. Smoothed win rate adds average games so small records aren't trusted fully.")
+            st.markdown(f'<p class="ban-line{" ban-lead" if i == 0 else ""}">{text}</p>', unsafe_allow_html=True)
+        st.caption(f"Ban score {r.score:.2f} · smoothed win rate {r.smoothed_wr:.0%}",
+                   help="Higher = better ban. Reasons are ordered by how much they add to the score. Smoothed win "
+                        "rate adds average games so small records aren't trusted fully.")
 
 
 # --- sidebar -------------------------------------------------------------------------
@@ -215,6 +219,8 @@ names = team_names()
 info = summary()
 
 with st.sidebar:
+    st.markdown("**Draft Tendency Analyzer**  \nScout an opponent's draft habits, plan bans and play out a draft. "
+                "Every number shows its sample size, and each method was tested on later games.")
     st.header("Matchup")
     our_ids = list(names.index)
     c9 = names[names == CLOUD9_LOL_TEAM]
@@ -278,8 +284,8 @@ c1.metric("Head-to-head", wl(h2h), pct_of(h2h) if h2h["games"] else "no meetings
 c2.metric(f"{our_name} overall", wl(ours), pct_of(ours), delta_color="off", delta_arrow="off")
 c3.metric(f"{opp_name} overall", wl(theirs), pct_of(theirs), delta_color="off", delta_arrow="off")
 
-tab_scout, tab_vs, tab_plan, tab_fearless, tab_sim, tab_insights = st.tabs(
-    ["Opponent scouting", "Against us", "Ban plan", "Fearless series", "Draft simulator", "Insights"])
+tab_prep, tab_sim, tab_scout, tab_insights, tab_plan, tab_fearless, tab_vs = st.tabs(
+    ["Match prep", "Draft simulator", "Opponent scouting", "Insights", "Ban plan", "Fearless series", "Against us"])
 
 # --- tab: opponent scouting --------------------------------------------------------------
 with tab_scout:
@@ -430,14 +436,16 @@ with tab_vs:
 with tab_plan:
     what_this_means(f"with our five bans, these take away the champions {opp_name} plays most and wins with, "
                     f"while sparing the ones we want for ourselves.")
-    recs = recommend_bans(our_id, opp_id, 5, tuple(sorted(weights.items())), last_patches)
+    recs = recommend_bans(our_id, opp_id, 5, tuple(sorted(weights.items())), last_patches, opp_name)
     st.subheader(f"Top 5 bans against {opp_name}")
+    st.caption(BT.headline_caption() + " Details: docs/VALIDATION.md.")
     if recs.empty:
         st.info(f"No champion qualifies: {opp_name} has no games in this window, or none picked "
                 f"'Minimum picks' times. Lower the slider or widen the patch window.")
     else:
         n_opp = int(recs["n_opp_games"].iloc[0])
-        st.caption(f"Based on {n_opp} {opp_name} games. Ranking uses the weights in the sidebar.")
+        st.caption(f"Based on {n_opp} {opp_name} games. Ranking uses the weights in the sidebar (defaults tuned on "
+                   f"2025 games). On each card the reason that adds most to the score comes first.")
         rows = [recs.iloc[:3], recs.iloc[3:]]
         rank = 1
         for chunk in rows:
@@ -451,7 +459,7 @@ with tab_plan:
                 "- **Win-rate edge**: how often they pick the champion (recent games count more) times how far "
                 "their smoothed win rate is above the pivot. Below the pivot this *lowers* the score: banning a "
                 "champion they lose on helps them.\n"
-                "- **Pick frequency**: optional credit for how often they play it at all.\n"
+                "- **Pick frequency**: credit for how often they play it at all (the biggest part by default).\n"
                 "- **Banned by other teams**: credit if other teams often ban it against them.\n"
                 "- **We play it too**: banning a champion we also want costs us, so the score drops.\n"
                 "- **Smoothing** adds average games to every record, so a 2-0 isn't treated as unbeatable."
@@ -517,7 +525,7 @@ with tab_fearless:
     used_them = p2.multiselect(f"Used by {opp_name}", list(champs.index), format_func=lambda c: champs[c],
                                key=f"used_them_{our_id}_{opp_id}")
     plan = series_plan(our_id, opp_id, tuple(sorted(used_us)), tuple(sorted(used_them)), rule,
-                       tuple(sorted(weights.items())), last_patches)
+                       tuple(sorted(weights.items())), last_patches, opp_name)
 
     lost, likely = plan["lost"], plan["likely_picks"]
     l1, l2 = st.columns(2)
@@ -908,6 +916,97 @@ with tab_insights:
                    help="2^entropy (Miller–Madow corrected): the number of equally likely options that would be "
                         "as hard to predict. Higher = harder to prepare for.")
     all_patterns(self_rep)
+
+
+# --- tab: match prep (first tab; built last so it can reuse every cached loader above) ------
+@st.cache_data(show_spinner="Preparing the match brief...")
+def match_prep(our, opp, weights_items):
+    return P.match_prep(our, opp, drafts=get_drafts(), scout=get_scout(), sim=get_sim(our, opp),
+                        insight_rep=insight_replication(), likely_acc=likely_accuracy(), weights=dict(weights_items))
+
+
+def badge(text: str) -> str:
+    return f'<span class="badge">{html.escape(text)}</span>'
+
+
+def details(*tabs: str) -> None:
+    st.caption("Details: " + " · ".join(f"**{t}** tab" for t in tabs))
+
+
+with tab_prep:
+    what_this_means(f"the 60-second brief before playing {opp_name}: what they'll draft, what to ban, how to beat "
+                    f"them and what they'll try against us. Each block names the tab with the details.")
+    p = match_prep(our_id, opp_id, tuple(sorted(weights.items())))
+    top_l, top_r = st.columns([3, 1], vertical_alignment="bottom")
+    top_l.caption(f"Records, form and bans: each team's last {p['window']} patches · insights: last "
+                  f"{p['insights_window']} patches · data through {p['data_through']}.")
+    top_r.download_button("Export pre-match report", data=P.render_html(p), mime="text/html",
+                          file_name=f"prematch_{our_name}_vs_{opp_name}.html".replace(" ", "_"),
+                          help="A one-page, text-only HTML report. Open it in a browser and print to PDF.")
+
+    h2h, fu, ft = p["h2h"], p["form"]["us"], p["form"]["them"]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Head-to-head", P.record_text(h2h["window"]),
+              f"{h2h['window']['games']} games in window · {P.record_text(h2h['all'])} all-time",
+              delta_color="off", delta_arrow="off")
+    for col, f, who in ((m2, fu, our_name), (m3, ft, opp_name)):
+        col.metric(f"{who} form", f"{f['wins']}–{f['losses']}",
+                   f"last {f['last_n']}: {' '.join(f['last']) or '–'}", delta_color="off", delta_arrow="off")
+    details("Opponent scouting")
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown(f"#### What {opp_name} will draft")
+        lk = pd.DataFrame(p["likely"])
+        if lk.empty:
+            st.info("No games to learn their habits from.")
+        else:
+            st.dataframe(lk.assign(prob=lk["prob"] * 100), hide_index=True, width="stretch",
+                         column_order=["champion", "role", "prob", "evidence"],
+                         column_config={"champion": "Champion", "role": "Role",
+                                        "prob": st.column_config.ProgressColumn("Chance", format="%.0f%%",
+                                                                                min_value=0, max_value=20),
+                                        "evidence": st.column_config.TextColumn("Evidence", width="large")})
+            st.caption("Most likely first-phase picks.")
+        for t in p["tells"]:
+            st.markdown(f"- {html.escape(t['takeaway'])} {badge(f'{t['n']} {t['unit']}')}", unsafe_allow_html=True)
+        details("Draft simulator", "Insights")
+    with right:
+        st.markdown("#### Our ban plan")
+        if not p["bans"]:
+            st.info(f"No champion qualifies: {opp_name} has too few games in the window.")
+        for i, b in enumerate(p["bans"], 1):
+            st.markdown(f"{i}. **{html.escape(b['champion'])}**: {html.escape(b['lead'])}"
+                        f"<div class='opt-ev'>{html.escape(' · '.join(b['more']))}</div>", unsafe_allow_html=True)
+        st.caption(f"From {p['ban_games']} {opp_name} games, strongest reason first. {p['ban_proof']}")
+        details("Ban plan")
+
+    st.markdown(f"#### How to beat {opp_name}")
+    if not p["beat"]:
+        st.info(f"No insight card passes the bar for {opp_name} in this window.")
+    else:
+        for col, c in zip(st.columns(len(p["beat"])), p["beat"]):
+            with col.container(border=True):
+                st.markdown(f"**{html.escape(c['title'])}**")
+                st.markdown(c["takeaway"])
+                st.markdown(badge(f"{c['n']} {c['unit']} · confidence {c['confidence']:.0%}"), unsafe_allow_html=True)
+    details("Insights")
+
+    w1, w2 = st.columns(2)
+    with w1:
+        st.markdown(f"#### Watch out: what {opp_name} bans against us")
+        if not p["they_ban"]:
+            st.info(f"No head-to-head games between {our_name} and {opp_name} in the data.")
+        for x in p["they_ban"]:
+            st.markdown(f"- **{html.escape(x['champion'])}**: banned in {x['bans']} of {x['games']} games "
+                        + (badge("small sample") if x["small_sample"] else ""), unsafe_allow_html=True)
+        details("Against us")
+    with w2:
+        st.markdown("#### Watch out: our predictable habits")
+        for line in p["habits"]:
+            st.markdown(f"- {line}")
+        details("Insights (self-scouting)")
+    st.info(p["proof"])
 
 
 # --- footer --------------------------------------------------------------------------------

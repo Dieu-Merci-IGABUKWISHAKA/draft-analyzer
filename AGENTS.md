@@ -82,7 +82,10 @@ app/streamlit_app.py (dashboard)    notebooks/01_cloud9_scouting.py (text report
     - `priority_picks`: the very first pick and first-round picks (slots 7–12), split by whether the team had first pick.
     - `bans_by`: bans in phase 1 vs phase 2.
     - `bans_against`: bans aimed at the team. Both ban functions take `vs=` for head-to-head only.
-  - **Ban plan:** `recommend_bans` with `DEFAULT_BAN_WEIGHTS` (every knob in one dict). The score is the opponent's pick rate × their smoothed win-rate edge over 50%, plus a small term for how often other teams ban it against them. Positive scores are cut when we play the champion ourselves. Win rates are smoothed with 10 imaginary games at the opponent's overall rate, and champions with fewer than 4 picks are skipped. Each pick comes with plain-English `reason_lines`.
+  - **Ban plan:** `recommend_bans` with `DEFAULT_BAN_WEIGHTS`, tuned on 2025 games (see backtest.py).
+    - **Score:** recent pick rate × (2 + 3 × smoothed win-rate edge over 50%), plus 1 × how often other teams ban it against them.
+    - **Filter:** champions with fewer than 2 picks are skipped.
+    - **Reasons:** each pick comes with plain-English `reason_lines` ordered by their contribution to the score (`drivers`), so the first line is the driving reason. `opponent_name` sets the wording.
   - **Fearless:**
     - `fearless_events` detects the rule per event from repeated picks within a series ("hard" means no team ever re-picks).
     - `fearless_game_ids` lists the games in multi-game Fearless series.
@@ -123,15 +126,18 @@ app/streamlit_app.py (dashboard)    notebooks/01_cloud9_scouting.py (text report
   - **Previous weights:** `PREVIOUS_BAN_WEIGHTS` keeps the old hand-set weights for comparison.
 - **`analysis.recommend_bans`** is split into `ban_stats` (slow, weight-independent) and `ban_scores` (cheap). Its output is unchanged.
 
+- **`prep.py`**: Match prep. `match_prep` assembles the one-screen brief from existing functions, with no new statistics. `render_html` produces the printable, text-only pre-match report.
+
 ### `app/streamlit_app.py`
 
 `st.cache_data` wrappers around the `analysis` functions, then layout only.
-- **Sidebar:** matchup (us and the opponent, default LYON), recency (last N patches, default 6, and the half-life), and a slider for each ban-score weight.
+- **Theme and sidebar:** `.streamlit/config.toml` sets the theme (calm blue primary, sans serif). The sidebar opens with a 2-line intro, then the matchup (us and the opponent, default LYON), recency (last N patches, default 6, and the half-life), and a slider for each ban-score weight.
 - **Header:** overall and head-to-head records.
-- **Six tabs:**
+- **Seven tabs, in this order:** Match prep, Draft simulator, Opponent scouting, Insights, Ban plan, Fearless series, Against us. The Match prep code sits at the end of the script so it can reuse every cached loader.
+  - **Match prep:** head-to-head and form, what they'll draft, our ban plan, how to beat them, and watch out (their bans vs us, our habits), plus the proof line and the "Export pre-match report" download. Every block names its detail tab.
   - **Opponent scouting:** champion pool chart and table, priority picks, bans by phase, and a short **Early game** section (macro.py, 12 patches): only lines that held up, plus an expander with every number and the replication table.
   - **Against us:** bans each side makes in head-to-head games.
-  - **Ban plan:** top 5 ban cards with reasons.
+  - **Ban plan:** top 5 ban cards, strongest reason first, with the backtest caption (`backtest.headline_caption`).
   - **Fearless series:** stats for games 1 to 5, plus the series planner.
   - **Insights:** "How to beat <opponent>" (top 5 cards that pass the bar), their draft habits, all patterns, "Are these patterns real?" (likely-pick accuracy plus the replication table), and self-scouting for our team.
   - **Draft simulator:** the board, win chance with its band, best options, and likely picks from them. Session state holds the actions; the draft is replayed through `Simulator.apply` on every rerun.
@@ -195,4 +201,5 @@ From data as of patch 16.17. The README holds the current wording, so keep it in
 | Time-based validation | **Done for the model, likely picks, insight and macro patterns, and the Ban plan** (docs/VALIDATION.md). Not time-based: role inference (held out by whole events, not later games). |
 | Early-game macro context | **Built (Phase 4).** Five first objectives per game, with team and time, extracted in the drafts pass. The Opponent scouting tab shows only lines that held up in later games (docs/MACRO.md). Most early-game habits did not. |
 | Ban plan validated | **Done (Phase 5).** Walk-forward backtest with weights tuned on 2025 and tested on 2026. It beats the naive top-5 by +14.0 pts and the league meta by +6.9 pts on pick rate. There's no consistent evidence the listed champions win them more games. See docs/VALIDATION.md and the README "Does it work?" section. |
+| Finished-product pass | **Done (Phase 6).** Match prep first tab, HTML export, theme, sidebar intro, ordered ban reasons and the backtest caption. Checked in Chrome for LYON, FlyQuest, Team Liquid Alienware and G2 Esports, with no console or server errors. The narrow-width visual check is not done (screenshots failed after a window resize). |
 | Screenshots and demo video | **Not done.** `docs/images/` is empty, and the video link in the README is a placeholder. |

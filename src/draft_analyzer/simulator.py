@@ -498,11 +498,20 @@ class Simulator:
             return None
         avail = self.available_mask(setup, actions)
         t, tu = self.tend.team(self.them), self.tend.team(self.us)
-        if nxt["kind"] == "pick":
-            open_r = self.open_roles(setup, actions, "them")
-            p = pick_probs(self.tend, self.them, nxt["phase"], open_r, avail)
+        open_r = self.open_roles(setup, actions, "them")
+        return {"slot": nxt, "kind": nxt["kind"], "table": self._likely_table(nxt["kind"], nxt["phase"], open_r, avail, n)}
+
+    def likely_first_phase_picks(self, n: int = 5) -> pd.DataFrame:
+        """Their most likely picks in the first pick phase of a fresh draft (all roles open,
+        everything available): the same model as likely_next (checked in likely_accuracy)."""
+        return self._likely_table("pick", 1, list(ROLES), np.ones(len(self.champs)), n)
+
+    def _likely_table(self, kind: str, phase: int, open_r: list[str], avail: np.ndarray, n: int) -> pd.DataFrame:
+        t, tu = self.tend.team(self.them), self.tend.team(self.us)
+        if kind == "pick":
+            p = pick_probs(self.tend, self.them, phase, open_r, avail)
         else:
-            p = ban_probs(self.tend, self.them, self.us, nxt["phase"], avail)
+            p = ban_probs(self.tend, self.them, self.us, phase, avail)
         top = np.argsort(-p)[:n]
         rows = []
         champ_meta = self.live.hist.champ
@@ -511,21 +520,21 @@ class Simulator:
             meta = champ_meta.loc[c] if c in champ_meta.index else None
             meta_txt = (f"league: in {meta['presence']:.0%} of games (last 3 patches, {int(meta['window_games'])} games)"
                         if meta is not None else "league: not played in the last 3 patches")
-            if nxt["kind"] == "pick":
+            if kind == "pick":
                 n1, n2 = int(t["pick_n1"][i]), int(t["pick_n2"][i])
                 role = max(open_r, key=lambda r: self.tend.role_probs(self.them)[i, ROLES.index(r)]) if open_r else None
                 ev = f"Picked {n1 + n2}× in their last {t['games']} games ({n1} in phase 1) · {meta_txt}"
                 small = (n1 + n2) < SMALL_SAMPLE
             else:
-                b = int(t[f"ban_n{nxt['phase']}"][i])
+                b = int(t[f"ban_n{phase}"][i])
                 ours = int(tu["pick_n1"][i] + tu["pick_n2"][i])
                 role = None
-                ev = (f"Banned {b}× in phase {nxt['phase']} of their last {t['games']} games · "
+                ev = (f"Banned {b}× in phase {phase} of their last {t['games']} games · "
                       f"we picked it {ours}× in our last {tu['games']} games · {meta_txt}")
                 small = b < SMALL_SAMPLE
             rows.append({"champion_id": c, "champion": self.live.names[c], "role": role, "prob": float(p[i]),
                          "evidence": ev, "small_sample": small})
-        return {"slot": nxt, "kind": nxt["kind"], "table": pd.DataFrame(rows)}
+        return pd.DataFrame(rows)
 
 
 # --- checking "likely from them" on past games ---------------------------------------------
