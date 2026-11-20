@@ -35,6 +35,7 @@ ROLE_ORDER = ["top", "jungle", "mid", "bot", "support"]
 ROLE_COLORS = {"top": "#4C78A8", "jungle": "#54A24B", "mid": "#E45756", "bot": "#F58518", "support": "#B279A2"}
 PHASE_COLORS = {"Phase 1 (bans 1-6)": "#4C78A8", "Phase 2 (bans 7-10)": "#F58518"}
 GREY = "#9aa0a6"
+CHART_CONFIG = {"displayModeBar": False}   # the toolbar covers the legend on narrow screens
 
 st.markdown("""
 <style>
@@ -150,6 +151,10 @@ def macro_summary(team):
 
 
 # --- display helpers -----------------------------------------------------------------
+def n_games(n: int) -> str:
+    return f"{n} game{'s' if n != 1 else ''}"
+
+
 def wl(rec: dict) -> str:
     return f"{rec['wins']}–{rec['losses']}" if rec["games"] else "no games"
 
@@ -196,7 +201,7 @@ def show_bans(bans: pd.DataFrame, empty_msg: str) -> None:
     if bans.empty:
         st.info(empty_msg)
         return
-    st.plotly_chart(bans_chart(bans), width="stretch")
+    st.plotly_chart(bans_chart(bans), width="stretch", config=CHART_CONFIG)
     with st.expander("Table"):
         st.dataframe(bans.assign(ban_rate=bans["ban_rate"] * 100, weighted_ban_rate=bans["weighted_ban_rate"] * 100),
                      column_config=BAN_COLUMNS, hide_index=True, width="stretch")
@@ -318,7 +323,7 @@ with tab_scout:
             fig.update_layout(height=60 + 28 * len(top), margin=dict(l=0, r=40, t=10, b=0),
                               legend=dict(orientation="h", y=1.06, title=None),
                               xaxis_title="games played (label = W-L)", yaxis_title=None)
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, width="stretch", config=CHART_CONFIG)
 
             table = shown.assign(win_rate_bar=shown["win_rate"].map(text_bar),
                                  pick_rate=shown["pick_rate"] * 100,
@@ -353,7 +358,7 @@ with tab_scout:
                             (cols[1], "second pick", "When they pick second")]:
         part = pp[pp["draft_position"] == pos]
         n = int(part["n_games"].iloc[0]) if len(part) else 0
-        col.markdown(f"**{label}** - {n} games")
+        col.markdown(f"**{label}** - {n_games(n)}")
         if part.empty:
             col.info("No games.")
             continue
@@ -492,7 +497,8 @@ with tab_fearless:
         cols = st.columns(len(A.FEARLESS_ORDER))
         for col, r in zip(cols, summ.itertuples()):
             col.metric(f"Game {r.game[1:]}", r.record.replace("-", "–") if r.games else "–",
-                       f"{r.games} games" + (f" · {r.win_rate:.0%}" if r.games else ""), delta_color="off",
+                       f"{r.games} game{'s' if r.games != 1 else ''}" + (f" · {r.win_rate:.0%}" if r.games else ""),
+                       delta_color="off",
                        delta_arrow="off", help=f"{r.games} games, {r.distinct_champions} different champions")
             if r.small_sample:
                 col.markdown(":orange[Small sample]", help=f"Fewer than {A.SMALL_SAMPLE} games")
@@ -502,18 +508,18 @@ with tab_fearless:
         tp = fb["top_picks"]
         for tab, g in zip(st.tabs([f"Most picked in game {g[1:]}" for g in A.FEARLESS_ORDER]), A.FEARLESS_ORDER):
             part = tp[tp["game"] == g]
-            n_games = int(summ.loc[summ["game"] == g, "games"].iloc[0])
+            games_in = int(summ.loc[summ["game"] == g, "games"].iloc[0])
             if part.empty:
                 tab.info("No games.")
                 continue
-            if n_games < A.SMALL_SAMPLE:
-                tab.warning(f"Only {n_games} game{'s' if n_games != 1 else ''}: too few to call this a tendency.")
+            if games_in < A.SMALL_SAMPLE:
+                tab.warning(f"Only {n_games(games_in)}: too few to call this a tendency.")
             tab.dataframe(part.assign(pick_rate=part["pick_rate"] * 100), hide_index=True, width="stretch",
                           column_order=["champion", "role", "picks", "pick_rate"],
                           column_config={"champion": "Champion", "role": "Role (inferred)",
-                                         "picks": st.column_config.NumberColumn("Picks", help=f"Out of {n_games} games"),
+                                         "picks": st.column_config.NumberColumn("Picks", help=f"Out of {n_games(games_in)}"),
                                          "pick_rate": st.column_config.ProgressColumn(
-                                             f"Of {n_games} games", format="%.0f%%", min_value=0, max_value=100)})
+                                             f"Of {n_games(games_in)}", format="%.0f%%", min_value=0, max_value=100)})
 
     st.subheader("Series planner")
     st.caption(f"Mark the champions already played earlier in this series. Rule applied: {rule} Fearless "
@@ -740,7 +746,7 @@ with tab_sim:
                                                                        min(100, traj["hi"].max() * 100 + 5)]},
                       xaxis={"tickmode": "array", "tickvals": traj["step"], "ticktext": traj["short"],
                              "range": [-0.5, S.N_SLOTS + 0.5]})
-    m2.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+    m2.plotly_chart(fig, width="stretch", config=CHART_CONFIG)
     st.caption("**The draft typically shifts odds by about 3 points; team strength matters more.** In testing on "
                "897 later games the draft added no reliable accuracy beyond team strength (docs/MODEL.md). "
                "Bans don't move this line directly; their value shows in what they deny. Always taking the top "
