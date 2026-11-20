@@ -47,6 +47,14 @@ MIN_RELIABILITY = 0.25
 MIN_CONFIDENCE = 0.80
 
 
+def holds_up(kept: float, late_gap_lo: float) -> bool:
+    """A kind of pattern holds up if, among its confident cases, at least MIN_RELIABILITY of
+    the gap survived in later games AND the 90% interval of the later gap is above zero.
+    (The second condition was added in the macro phase; it changes nothing here: every kind
+    that kept >= 25% here also has a later-gap interval above zero.)"""
+    return bool(kept >= MIN_RELIABILITY and late_gap_lo > 0)
+
+
 # --- statistics ---------------------------------------------------------------------------
 def wilson(k: int, n: int, z: float = Z90) -> tuple[float, float]:
     """Wilson score interval for k successes in n trials."""
@@ -492,13 +500,15 @@ class Scout:
         tg = self.team_games(team, last_patches)
         cards = self.cards_from(team, tg, view) + [t.as_card() for t in self.phase_tells(team, tg, view)]
         rep = {} if replication is None or replication.empty else replication.set_index("kind").to_dict("index")
+        holds = {k: holds_up(v["survives"], v.get("late_gap_lo", float("inf"))) for k, v in rep.items()}
         for c in cards:
             if replication is not None:
                 c.reliability = float(rep.get(c.kind, {}).get("survives", 0.0))
                 c.typical = float(rep.get(c.kind, {}).get("early_gap", 1.0)) or 1.0
         cards = sorted(cards, key=lambda c: (-c.score, -c.effect))
         pred = self.predictability(team, last_patches)
-        passes = [c for c in cards if c.reliability >= MIN_RELIABILITY and c.confidence >= MIN_CONFIDENCE]
+        passes = [c for c in cards if c.confidence >= MIN_CONFIDENCE
+                  and (replication is None or holds.get(c.kind, False))]
         return {"team": self.team_names.get(team, team), "games": len(tg), "cards": cards,
                 "top": passes[:top], "passing": len(passes), "predictability": pred,
                 "predictability_takeaways": self.predictability_takeaways(team, pred, view)}

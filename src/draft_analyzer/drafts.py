@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import sys
 import time
 from collections import deque
@@ -31,6 +32,16 @@ from draft_analyzer.config import CACHE_DIR, DATA_DIR, LOL_DIR, META_DIR  # noqa
 from draft_analyzer.roles import infer_roles  # noqa: E402
 
 DRAFTS_PATH = CACHE_DIR / "drafts.parquet"
+OBJECTIVES_PATH = CACHE_DIR / "objective_events.parquet"   # early-game events, see macro.py
+
+# Event types collected for macro.py. Lines are pre-filtered on substrings of the event
+# type ("slayDragon" alone also appears inside every later snapshot's objective lists),
+# then events are kept by full type. Early-2025 feeds have only the drake-type events
+# (slayMountainDrake, ...), later ones also the generic slayDragon, so both are kept.
+OBJECTIVE_MARKERS = ("-completed-slay", "-!completed-slay", "destroyed-tower", "player-killed-player",
+                     "player-!killed-player")   # "!" = undo of an earlier event
+OBJECTIVE_TYPE_RE = re.compile(r"completed-slay(Dragon|\w+Drake|VoidGrub|RiftHerald)$|destroyed-tower$"
+                               r"|^player-killed-player$")
 
 COLUMNS = [
     "series_id", "game_id", "game_number", "event", "stage", "date", "patch",
@@ -64,6 +75,39 @@ except ImportError:
             zstandard.ZstdDecompressor().stream_reader(open(path, "rb"), closefd=True),
             encoding="utf-8",
         )
+
+
+def scan_series(path: Path, objectives: bool = True) -> tuple[dict | None, list[dict]]:
+    """One pass over a feed: the final seriesState (as final_series_state) and, if
+    `objectives`, every OBJECTIVE_TYPES event with its game, team and game-clock seconds.
+    Undo events ("!") are kept with undo=True; macro.py applies them."""
+    tail: deque[str] = deque(maxlen=20)
+    events: list[dict] = []
+    with open_zst(path) as f:
+        for line in f:
+            if '"seriesState"' in line:
+                tail.append(line)
+            if objectives and any(m in line for m in OBJECTIVE_MARKERS):
+                env = json.loads(line)
+                for e in env.get("events", []):
+                    if not OBJECTIVE_TYPE_RE.search(e["type"].replace("!", "")):
+                        continue
+                    gids = [g["id"] for g in (e.get("seriesStateDelta") or {}).get("games", [])]
+                    if not gids:
+                        continue
+                    clocks = {g["id"]: (g.get("clock") or {}).get("currentSeconds")
+                              for g in (e.get("seriesState") or {}).get("games", [])}
+                    actor = e.get("actor") or {}
+                    team = (actor.get("state") or {}).get("teamId") if actor.get("type") == "player" else actor.get("id")
+                    events.append({"game_id": gids[0], "type": e["type"].replace("!", ""), "undo": "!" in e["type"],
+                                   "actor_kind": actor.get("type"), "team_id": team,
+                                   "target_id": (e.get("target") or {}).get("id"), "seconds": clocks.get(gids[0]),
+                                   "occurred_at": env.get("occurredAt"), "order": len(events)})
+    for line in reversed(tail):
+        for event in reversed(json.loads(line).get("events", [])):
+            if event.get("seriesState"):
+                return event["seriesState"], events
+    return None, events
 
 
 def final_series_state(path: Path) -> dict | None:
@@ -127,8 +171,9 @@ def _load_meta() -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str]]:
     return games, series, champ_names
 
 
-def build_drafts(finished_only: bool = True) -> pd.DataFrame:
-    """Stream every series in lol/series.csv and return one row per draft action."""
+def build_drafts(finished_only: bool = True, objectives_out: list | None = None) -> pd.DataFrame:
+    """Stream every series in lol/series.csv and return one row per draft action. If
+    `objectives_out` is a list, the same pass appends every series' objective events to it."""
     games, series, champ_names = _load_meta()
     rows: list[dict] = []
     seen_games: set[str] = set()
@@ -138,7 +183,9 @@ def build_drafts(finished_only: bool = True) -> pd.DataFrame:
 
     for i, s in enumerate(series.itertuples(index=False), 1):
         print(f"\r[{i}/{n}] series {s.series_id}  ({time.time() - t0:.0f}s)", end="", file=sys.stderr, flush=True)
-        state = final_series_state(DATA_DIR / s.file)
+        state, obj = scan_series(DATA_DIR / s.file, objectives=objectives_out is not None)
+        if objectives_out is not None:
+            objectives_out.extend({**e, "series_id": s.series_id} for e in obj)
         if state is None:
             warnings.append(f"series {s.series_id}: no seriesState in feed")
             continue
@@ -224,10 +271,13 @@ def build_drafts(finished_only: bool = True) -> pd.DataFrame:
 def load_drafts(rebuild: bool = False) -> pd.DataFrame:
     """Load the drafts table from the cache, building it if needed (or if rebuild=True)."""
     if rebuild or not DRAFTS_PATH.exists():
-        df = build_drafts()
+        objectives: list[dict] = []
+        df = build_drafts(objectives_out=objectives)
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         df.to_parquet(DRAFTS_PATH, index=False)
-        print(f"Saved {len(df)} rows to {DRAFTS_PATH}", file=sys.stderr)
+        pd.DataFrame(objectives).to_parquet(OBJECTIVES_PATH, index=False)
+        print(f"Saved {len(df)} rows to {DRAFTS_PATH} and {len(objectives)} objective events to {OBJECTIVES_PATH}",
+              file=sys.stderr)
         return df
     return pd.read_parquet(DRAFTS_PATH)
 

@@ -18,6 +18,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from draft_analyzer import analysis as A  # noqa: E402
 from draft_analyzer import insights as I  # noqa: E402
+from draft_analyzer import macro as MA  # noqa: E402
 from draft_analyzer import model as M  # noqa: E402
 from draft_analyzer import simulator as S  # noqa: E402
 from draft_analyzer.config import CLOUD9_LOL_TEAM  # noqa: E402
@@ -120,6 +121,26 @@ def series_plan(our_id, opp_id, used_by_us, used_by_them, rule, weights, last_pa
 def recommend_bans(our_id, opp_id, n, weights, last_patches):
     return A.recommend_bans(our_id, opp_id, n=n, weights=dict(weights), drafts=get_drafts(),
                             last_patches=last_patches)
+
+
+@st.cache_resource(show_spinner="Preparing insights...")
+def get_scout():
+    return I.Scout(load_drafts())
+
+
+@st.cache_resource(show_spinner="Reading early-game events...")
+def get_macro():
+    return MA.Macro(get_scout())
+
+
+@st.cache_data(show_spinner="Checking which early-game patterns hold up in later games...")
+def macro_replication() -> pd.DataFrame:
+    return MA.load_replication(get_macro())
+
+
+@st.cache_data(show_spinner=False)
+def macro_summary(team):
+    return get_macro().summary(team, I.DEFAULT_PATCHES, replication=macro_replication())
 
 
 # --- display helpers -----------------------------------------------------------------
@@ -346,6 +367,50 @@ with tab_scout:
     st.subheader(f"Bans {opp_name} makes")
     st.caption("Phase 1 bans usually remove the strongest champions; phase 2 bans usually counter picks already made.")
     show_bans(bans_by(opp_id, last_patches, half_life), "No bans in this window.")
+
+    st.subheader(f"Early game: {opp_name}")
+    mac = macro_summary(opp_id)
+    prof = mac["profile"]
+    st.caption(f"Supporting context from the game event feeds: {mac['games']} {opp_name} games in their last "
+               f"{I.DEFAULT_PATCHES} patches. Only patterns of a kind that held up in later games, and that are "
+               f"confident for {opp_name}, are listed.")
+    lines = []
+    for r in prof[prof["show_rate"]].itertuples():
+        lines.append(f"**{r.objective}**: {opp_name} take it {r.rate:.0%} of the time ({r.took} of {r.games} games; "
+                     f"90% range {r.lo:.0%}–{r.hi:.0%}).")
+    for r in prof[prof["show_timing"]].itertuples():
+        lines.append(f"**{r.objective}**: when they take it, median {MA.mmss(r.their_median_s)} vs "
+                     f"{MA.mmss(r.league_median_s)} league-wide ({r.taken_n} games).")
+    lines += mac["jungler_lines"]
+    if lines:
+        for line in lines:
+            st.markdown(f"- {line}")
+    else:
+        st.caption(f"No early-game pattern for {opp_name} passes the bar.")
+    with st.expander("All early-game numbers, and which kinds held up"):
+        st.dataframe(prof.assign(rate=prof["rate"] * 100, their=prof["their_median_s"].map(MA.mmss),
+                                 league=prof["league_median_s"].map(MA.mmss),
+                                 sample=prof["took"].astype(str) + " of " + prof["games"].astype(str)),
+                     hide_index=True, width="stretch",
+                     column_order=["objective", "rate", "sample", "their", "league"],
+                     column_config={"objective": "First…", "rate": st.column_config.NumberColumn(
+                                        f"{opp_name} took it", format="%.0f%%"),
+                                    "sample": "Games", "their": "Their median time",
+                                    "league": "League median"})
+        rep = macro_replication()
+        st.dataframe(rep.assign(held=[I.holds_up(a, b) for a, b in zip(rep["survives"], rep["late_lo"])],
+                                same_direction=rep["same_direction"] * 100, survives=rep["survives"] * 100),
+                     hide_index=True, width="stretch",
+                     column_order=["kind", "objective", "checks", "same_direction", "survives", "held"],
+                     column_config={"kind": "Pattern", "objective": "Objective",
+                                    "checks": st.column_config.NumberColumn("Checks", help="Confident patterns"),
+                                    "same_direction": st.column_config.NumberColumn("Same direction", format="%.0f%%"),
+                                    "survives": st.column_config.NumberColumn("Kept", format="%.0f%%"),
+                                    "held": st.column_config.CheckboxColumn("Held up")})
+        st.caption("Each team's patterns from games before July 2025 and April 2026 were measured again on later "
+                   "games. 'Held up' = at least 25% of the gap kept and the later gap's 90% range above zero. "
+                   "Most early-game habits did not hold up; first-tower rate (mostly team strength) and the "
+                   "jungler–first-grub link did. Timings are game-clock times from the feeds.")
 
 # --- tab: against us ----------------------------------------------------------------------
 with tab_vs:
@@ -720,11 +785,6 @@ with tab_sim:
 
 
 # --- tab: insights --------------------------------------------------------------------------
-@st.cache_resource(show_spinner="Preparing insights...")
-def get_scout():
-    return I.Scout(load_drafts())
-
-
 @st.cache_data(show_spinner="Checking which kinds of pattern hold up in later games (first run: about 30 s)...")
 def insight_replication() -> pd.DataFrame:
     return I.load_replication(get_scout())
