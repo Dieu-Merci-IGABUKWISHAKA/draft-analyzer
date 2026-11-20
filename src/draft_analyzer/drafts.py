@@ -5,6 +5,7 @@ It already has "!" undo events and rolled-back games resolved, and in a few
 games it holds bans that the ``team-*-character`` event stream missed.
 Patch, sides, team names and the winner come from ``meta/games.csv``;
 champion names from ``meta/characters.csv``. Everything joins on IDs.
+Picks also get the player and an inferred role from ``roles.py``.
 
 Usage:
     python src/draft_analyzer/drafts.py            # load cache (build if missing)
@@ -27,6 +28,7 @@ if __package__ in (None, ""):  # allow running this file directly
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from draft_analyzer.config import CACHE_DIR, DATA_DIR, LOL_DIR, META_DIR  # noqa: E402
+from draft_analyzer.roles import infer_roles  # noqa: E402
 
 DRAFTS_PATH = CACHE_DIR / "drafts.parquet"
 
@@ -35,6 +37,9 @@ COLUMNS = [
     "team_id", "team_name", "opponent_id", "opponent_name", "side", "action",
     "draft_order", "champion_id", "champion_name", "game_winner_team_id",
 ]
+# Picks only (see roles.py); empty for bans.
+ROLE_COLUMNS = ["player_name", "role_inferred", "role_source"]
+COLUMNS += ROLE_COLUMNS
 
 # Standard pro tournament draft: slot -> (drafter, action), where "F" is the
 # team with first pick and "S" the other. Until 2025 F was always blue side;
@@ -198,9 +203,20 @@ def build_drafts(finished_only: bool = True) -> pd.DataFrame:
     for w in warnings:
         print("  warning:", w, file=sys.stderr)
 
-    df = pd.DataFrame(rows, columns=COLUMNS)
+    df = pd.DataFrame(rows, columns=COLUMNS[:-len(ROLE_COLUMNS)])
+
+    # Picks get the player who played the champion and their inferred role
+    # (see roles.py: there is no role field in the data). Bans stay empty.
+    roles = infer_roles().rename(columns={"character_id": "champion_id"})
+    df = df.merge(roles.drop(columns="player_id"), on=["game_id", "team_id", "champion_id"], how="left")
+    df.loc[df["action"] == "ban", ROLE_COLUMNS] = None
+    unmatched = df[(df["action"] == "pick") & df["role_inferred"].isna()]
+    if len(unmatched):
+        print(f"  warning: {len(unmatched)} picks have no roster match for a role", file=sys.stderr)
+
     df["date"] = pd.to_datetime(df["date"]).dt.date
-    for col in ("event", "stage", "patch", "side", "action", "team_name", "opponent_name", "champion_name"):
+    for col in ("event", "stage", "patch", "side", "action", "team_name", "opponent_name", "champion_name",
+                "role_inferred", "role_source"):
         df[col] = df[col].astype("category")
     return df.sort_values(["date", "series_id", "game_number", "draft_order"]).reset_index(drop=True)
 

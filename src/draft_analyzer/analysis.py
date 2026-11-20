@@ -1,0 +1,231 @@
+"""Draft scouting metrics for one team, built on the drafts table.
+
+Every function takes a GRID team_id and returns a DataFrame. Sample sizes
+are always included: `games` / `n_games` columns, W-L records, and a
+`small_sample` flag where a rate rests on fewer than SMALL_SAMPLE games.
+
+Recency (optional on most functions):
+  last_patches=N  keep only the team's N most recent patches
+  half_life=H     weight a game by 0.5 ** (patches_ago / H), so a game
+                  H patches older than the team's latest counts half.
+"patches_ago" counts patches present in the data (some patches have no games).
+"""
+
+from __future__ import annotations
+
+import pandas as pd
+
+from draft_analyzer.drafts import load_drafts
+
+SMALL_SAMPLE = 5
+PHASE1_BANS = range(1, 7)
+PHASE1_PICKS = range(7, 13)
+PHASE2_BANS = range(13, 17)
+FIRST_PICK_SLOT = 7          # the first-pick team's first pick
+SECOND_TEAM_FIRST_SLOT = 8   # the other team's first pick (slot 9 follows at once)
+RECENT_PATCHES = 3           # window used for "recent" counts in ban reasons
+
+_drafts_cache: pd.DataFrame | None = None
+
+
+def _drafts(drafts: pd.DataFrame | None) -> pd.DataFrame:
+    global _drafts_cache
+    if drafts is not None:
+        return drafts
+    if _drafts_cache is None:
+        _drafts_cache = load_drafts()
+    return _drafts_cache
+
+
+def _patch_key(patch: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in str(patch).split("."))
+
+
+def team_games(team_id: str, drafts: pd.DataFrame | None = None,
+               last_patches: int | None = None, half_life: float | None = None) -> pd.DataFrame:
+    """One row per game the team played: patch, date, won, had_first_pick, weight."""
+    df = _drafts(drafts)
+    patches = sorted(df["patch"].dropna().astype(str).unique(), key=_patch_key)
+    patch_idx = {p: i for i, p in enumerate(patches)}
+
+    rows = df[df["team_id"] == team_id]
+    games = rows.groupby("game_id", observed=True).agg(
+        series_id=("series_id", "first"), date=("date", "first"), patch=("patch", "first"),
+        event=("event", "first"), opponent_id=("opponent_id", "first"),
+        opponent_name=("opponent_name", "first"), side=("side", "first"),
+        winner=("game_winner_team_id", "first"),
+    )
+    games["won"] = games["winner"] == team_id
+    first_pickers = df.loc[df["draft_order"] == FIRST_PICK_SLOT, ["game_id", "team_id"]]
+    fp_games = set(first_pickers.loc[first_pickers["team_id"] == team_id, "game_id"])
+    games["had_first_pick"] = games.index.isin(fp_games)
+
+    pidx = games["patch"].astype(str).map(patch_idx)
+    games["patches_ago"] = pidx.max() - pidx if len(games) else pidx
+    if last_patches is not None:
+        recent = sorted(pidx.unique())[-last_patches:]
+        games = games[pidx.isin(recent)]
+    games["weight"] = 0.5 ** (games["patches_ago"] / half_life) if half_life else 1.0
+    return games.drop(columns="winner")
+
+
+def _record(wins: pd.Series, games: pd.Series) -> pd.Series:
+    return wins.astype(int).astype(str) + "-" + (games - wins).astype(int).astype(str)
+
+
+def champion_pool(team_id: str, last_patches: int | None = None, half_life: float | None = None,
+                  drafts: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Champions the team picked, per inferred role: games, record, win rate, recency."""
+    df = _drafts(drafts)
+    games = team_games(team_id, df, last_patches, half_life)
+    picks = df[(df["team_id"] == team_id) & (df["action"] == "pick") & df["game_id"].isin(games.index)]
+    picks = picks.join(games[["won", "weight"]], on="game_id")
+
+    out = picks.groupby(["champion_name", "role_inferred"], observed=True, dropna=False).agg(
+        games=("game_id", "size"), wins=("won", "sum"), weighted_games=("weight", "sum"),
+        last_played=("date", "max"), last_patch=("patch", lambda s: max(s.astype(str), key=_patch_key)),
+    ).reset_index()
+    out = out.rename(columns={"champion_name": "champion", "role_inferred": "role"})
+    out["record"] = _record(out["wins"], out["games"])
+    out["win_rate"] = out["wins"] / out["games"]
+    out["pick_rate"] = out["games"] / len(games)
+    out["weighted_pick_rate"] = out["weighted_games"] / games["weight"].sum()
+    out["n_team_games"] = len(games)
+    out["small_sample"] = out["games"] < SMALL_SAMPLE
+    cols = ["champion", "role", "games", "record", "win_rate", "pick_rate", "weighted_pick_rate",
+            "last_played", "last_patch", "n_team_games", "small_sample"]
+    return out.sort_values(["weighted_games", "games"], ascending=False)[cols].reset_index(drop=True)
+
+
+def priority_picks(team_id: str, last_patches: int | None = None, half_life: float | None = None,
+                   drafts: pd.DataFrame | None = None) -> pd.DataFrame:
+    """First-phase picks (slots 7-12) and the team's very first pick, split by
+    whether the team had first pick (slot 7) or picked second (slots 8-9 first)."""
+    df = _drafts(drafts)
+    games = team_games(team_id, df, last_patches, half_life)
+    picks = df[(df["team_id"] == team_id) & (df["action"] == "pick")
+               & df["draft_order"].isin(PHASE1_PICKS) & df["game_id"].isin(games.index)]
+    picks = picks.join(games[["had_first_pick", "won", "weight"]], on="game_id")
+    picks["very_first"] = picks["draft_order"] == picks["had_first_pick"].map(
+        {True: FIRST_PICK_SLOT, False: SECOND_TEAM_FIRST_SLOT})
+
+    out = picks.groupby(["had_first_pick", "champion_name"], observed=True).agg(
+        phase1_picks=("game_id", "size"), very_first_picks=("very_first", "sum"),
+        wins=("won", "sum"), weighted=("weight", "sum"),
+    ).reset_index()
+    n = games.groupby("had_first_pick").agg(n_games=("won", "size"), w_games=("weight", "sum"))
+    out = out.join(n, on="had_first_pick")
+    out["draft_position"] = out["had_first_pick"].map({True: "first pick", False: "second pick"})
+    out["phase1_rate"] = out["phase1_picks"] / out["n_games"]
+    out["very_first_rate"] = out["very_first_picks"] / out["n_games"]
+    out["weighted_phase1_rate"] = out["weighted"] / out["w_games"]
+    out["record"] = _record(out["wins"], out["phase1_picks"])
+    out["small_sample"] = out["phase1_picks"] < SMALL_SAMPLE
+    out = out.rename(columns={"champion_name": "champion"})
+    cols = ["draft_position", "champion", "very_first_picks", "phase1_picks", "n_games", "very_first_rate",
+            "phase1_rate", "weighted_phase1_rate", "record", "small_sample"]
+    return out.sort_values(["draft_position", "weighted", "very_first_picks"],
+                           ascending=[True, False, False])[cols].reset_index(drop=True)
+
+
+def _bans(team_id: str, by_team: bool, last_patches, half_life, drafts) -> pd.DataFrame:
+    df = _drafts(drafts)
+    games = team_games(team_id, df, last_patches, half_life)
+    who = "team_id" if by_team else "opponent_id"
+    bans = df[(df[who] == team_id) & (df["action"] == "ban") & df["game_id"].isin(games.index)]
+    bans = bans.join(games[["weight"]], on="game_id")
+    bans["phase"] = bans["draft_order"].map(lambda s: 1 if s in PHASE1_BANS else 2)
+
+    out = bans.groupby("champion_name", observed=True).agg(
+        bans=("game_id", "size"),
+        phase1_bans=("phase", lambda s: (s == 1).sum()),
+        phase2_bans=("phase", lambda s: (s == 2).sum()),
+        weighted=("weight", "sum"),
+    ).reset_index().rename(columns={"champion_name": "champion"})
+    out["n_games"] = len(games)
+    out["ban_rate"] = out["bans"] / len(games)
+    out["weighted_ban_rate"] = out["weighted"] / games["weight"].sum()
+    out["small_sample"] = len(games) < SMALL_SAMPLE
+    cols = ["champion", "bans", "phase1_bans", "phase2_bans", "n_games", "ban_rate", "weighted_ban_rate", "small_sample"]
+    return out.sort_values(["weighted", "bans"], ascending=False)[cols].reset_index(drop=True)
+
+
+def bans_by(team_id: str, last_patches: int | None = None, half_life: float | None = None,
+            drafts: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Champions this team bans. Phase 1 = slots 1-6, phase 2 = slots 13-16."""
+    return _bans(team_id, True, last_patches, half_life, drafts)
+
+
+def bans_against(team_id: str, last_patches: int | None = None, half_life: float | None = None,
+                 drafts: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Champions opponents ban against this team."""
+    return _bans(team_id, False, last_patches, half_life, drafts)
+
+
+def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, half_life: float = 3.0,
+                   prior_games: float = 5.0, drafts: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Rank champions to ban against an opponent.
+
+    score = weighted_pick_rate * (smoothed_wr / opp_win_rate)   how much they lean on it, and how well it goes
+          + 0.5 * weighted_banned_against_rate                    other teams already treat it as a threat
+    then x (1 - 0.5 * our_pick_rate)                              banning it also costs us if we play it
+
+    smoothed_wr adds `prior_games` imaginary games at the opponent's overall
+    win rate, so a 1-0 record lands near their average, not at 100%.
+    """
+    df = _drafts(drafts)
+    games = team_games(opponent_id, df, half_life=half_life)
+    W = games["weight"].sum()
+    opp_wr = games["won"].mean()
+    recent_ids = set(games.index[games["patch"].astype(str).isin(
+        sorted(games["patch"].astype(str).unique(), key=_patch_key)[-RECENT_PATCHES:])])
+
+    in_games = df[df["game_id"].isin(games.index)].join(games[["won", "weight"]], on="game_id")
+    picks = in_games[(in_games["team_id"] == opponent_id) & (in_games["action"] == "pick")]
+    banned_vs = in_games[(in_games["opponent_id"] == opponent_id) & (in_games["action"] == "ban")]
+
+    p = picks.groupby("champion_id").agg(
+        champion=("champion_name", "first"), picks=("game_id", "size"), wins=("won", "sum"),
+        w_picks=("weight", "sum"), recent_picks=("game_id", lambda s: s.isin(recent_ids).sum()),
+    )
+    b = banned_vs.groupby("champion_id").agg(
+        champion_b=("champion_name", "first"), banned_against=("game_id", "size"), w_banned=("weight", "sum"))
+    out = p.join(b, how="outer")
+    out["champion"] = out["champion"].fillna(out["champion_b"])
+    out = out.drop(columns="champion_b").fillna({"picks": 0, "wins": 0, "w_picks": 0, "recent_picks": 0,
+                                                 "banned_against": 0, "w_banned": 0})
+
+    ours = team_games(our_team_id, df, half_life=half_life)
+    our_picks = df[(df["team_id"] == our_team_id) & (df["action"] == "pick") & df["game_id"].isin(ours.index)]
+    our_picks = our_picks.join(ours[["weight"]], on="game_id").groupby("champion_id").agg(
+        our_picks=("game_id", "size"), our_w=("weight", "sum"))
+    out = out.join(our_picks).fillna({"our_picks": 0, "our_w": 0})
+
+    out["weighted_pick_rate"] = out["w_picks"] / W
+    out["smoothed_wr"] = (out["wins"] + prior_games * opp_wr) / (out["picks"] + prior_games)
+    out["weighted_banned_against_rate"] = out["w_banned"] / W
+    out["our_pick_rate"] = out["our_w"] / ours["weight"].sum() if len(ours) else 0.0
+    out["score"] = (out["weighted_pick_rate"] * out["smoothed_wr"] / opp_wr
+                    + 0.5 * out["weighted_banned_against_rate"]) * (1 - 0.5 * out["our_pick_rate"])
+
+    n_games, n_recent = len(games), len(recent_ids)
+
+    def reason(r) -> str:
+        parts = [f"Picked in {int(r.picks)}/{n_games} games ({int(r.recent_picks)}/{n_recent} in last {RECENT_PATCHES} patches)"]
+        if r.picks:
+            parts.append(f"{r.wins / r.picks:.0%} WR ({int(r.wins)}-{int(r.picks - r.wins)})")
+            if r.picks < SMALL_SAMPLE:
+                parts[-1] += ", small sample"
+        if r.banned_against:
+            parts.append(f"banned against them in {int(r.banned_against)}/{n_games}")
+        if r.our_picks:
+            parts.append(f"we also pick it ({int(r.our_picks)}/{len(ours)} of our games)")
+        return "; ".join(parts)
+
+    out = out.sort_values("score", ascending=False).head(n).reset_index(drop=True)
+    out["reason"] = out.apply(reason, axis=1)
+    out["record"] = _record(out["wins"], out["picks"])
+    out["n_opp_games"] = n_games
+    cols = ["champion", "score", "picks", "record", "smoothed_wr", "weighted_pick_rate",
+            "banned_against", "our_picks", "n_opp_games", "reason"]
+    return out[cols]
