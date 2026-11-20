@@ -40,7 +40,7 @@ Current coverage: see [Status vs the judges' questions](#status-vs-the-judges-qu
 6. **Run the data check before every commit.** From the repo root (Git Bash):
 
    ```bash
-   git ls-files | grep -Ei '\.(zst|jsonl|parquet|sqlite|duckdb|csv)$|stl-hackathon-2026-grid-starter|data_cache/'
+   git ls-files | grep -Ei '\.(zst|jsonl|parquet|sqlite|duckdb|csv|joblib|pkl)$|stl-hackathon-2026-grid-starter|data_cache/'
    ```
 
    It must print nothing. Also read `git diff --cached --name-only` before committing, and stage files by name, not with `git add -A` or `git add .`. If data was ever committed, stop and tell the user. Deleting it in a new commit is not enough because it stays in history.
@@ -58,6 +58,7 @@ GRID feeds (.jsonl.zst, outside the repo) + meta/*.csv
         ▼
 data_cache/drafts.parquet   (gitignored, one row per pick or ban)
         │  src/draft_analyzer/analysis.py (metrics, ban score, Fearless)
+        │  src/draft_analyzer/model.py    (win-probability model → data_cache/draft_model.joblib)
         ▼
 app/streamlit_app.py (dashboard)    notebooks/01_cloud9_scouting.py (text report)
 ```
@@ -87,6 +88,12 @@ app/streamlit_app.py (dashboard)    notebooks/01_cloud9_scouting.py (text report
     - `fearless_by_game` gives record, distinct champions and top picks for buckets **G1 / G2 / G3+**.
     - `series_plan` takes the champions already used and returns what the opponent loses, their likely picks now, and new bans.
 
+- **`model.py`**: draft win-probability model, P(first-pick team wins), described in [docs/MODEL.md](docs/MODEL.md).
+  - **Features:** Elo, side, and draft features summed over picks and bans so far, first-pick team minus the other. Every feature uses only games on **earlier dates**.
+  - **Training:** each game appears at all 21 draft stages, so the model works mid-draft.
+  - **Choice and validation:** K is tuned on 2025 games. The model is chosen on 2026-01-01..03-31 and tested once on games from 2026-04-01.
+  - **Commands:** `python src/draft_analyzer/model.py` validates and saves the model. `load_model()` loads it. `predict_draft(team_a, team_b, side_a, picks_a, picks_b, bans, date, patch)` scores a partial draft and returns sample sizes for every number.
+
 ### `app/streamlit_app.py`
 
 `st.cache_data` wrappers around the `analysis` functions, then layout only.
@@ -104,9 +111,9 @@ Run it with `python -m streamlit run app/streamlit_app.py`.
 
 - `notebooks/00_check_data.py`: a smoke test that the data is reachable. It streams one Cloud9 feed.
 - `notebooks/01_cloud9_scouting.py`: a text version of the scouting report.
-- `.idea/runConfigurations/`: shared PyCharm configurations: **Dashboard (Streamlit)**, **Rebuild drafts table**, **Cloud9 scouting report**.
-- `docs/AI_WORKFLOW.md` (how the project was built with Claude Code), `docs/SUBMISSION.md` (Devpost text), `docs/images/` (screenshots, still to add).
-- There are no automated tests yet.
+- `.idea/runConfigurations/`: shared PyCharm configurations: **Dashboard (Streamlit)**, **Rebuild drafts table**, **Cloud9 scouting report**, **Train draft model**, **Tests**.
+- `docs/AI_WORKFLOW.md` (how the project was built with Claude Code), `docs/SUBMISSION.md` (Devpost text), `docs/MODEL.md` (win-probability model and validation), `docs/images/` (screenshots, still to add).
+- `tests/`: pytest (`python -m pytest`, or the **Tests** run configuration). The tests build a synthetic drafts table, so they run without the licensed data. The real-data leakage test is skipped when the cache is missing. Test data must stay synthetic: never copy GRID rows into a fixture.
 
 ## Existing findings
 
@@ -118,6 +125,11 @@ From data as of patch 16.17. The README holds the current wording, so keep it in
 - **Cloud9 Kia vs LYON.** Cloud9 is 4–9 against LYON in the last 6 patches (13 games). In the same window LYON is 27–12 and Cloud9 23–22. Over all data Cloud9 is 90–52.
 - **Respect ban vs Cloud9 has shifted.** A respect ban removes a champion because the other team is strong on it. Ziggs is the most-banned champion against Cloud9 overall (41 bans in 142 games). With recency weighting (half-life 3 patches), Cassiopeia leads at 39% and Ziggs drops to 17%.
 - **LYON by game number in Fearless series, last 6 patches.** LYON is 11–2 in game 2, against 8–5 in both game 1 and game 3+ (13 games each). Over all data the gap is small (53% / 60% / 59%), so treat this as a recent trend on a small sample.
+- **Win-probability model** (test: 275 games from 2026-04-04 to 2026-10-13, trained on earlier games):
+  - Elo + side + draft gets 65.1% accuracy and log loss 0.631, against 64.4% and 0.642 for Elo alone.
+  - The draft's gain is small and not statistically clear: log loss +0.011, 95% CI −0.002..+0.025.
+  - A full draft moves the estimate by a median of 2.3 points.
+  - In 2026 blue side won 56.7% of test games, and first-pick teams only 47.6%, because many first-pick teams played on red.
 - **Ban score tuning history.** Version 1 over-ranked Nocturne, a champion LYON loses on (44%). Version 2 put LeBlanc (3–0) and Varus (4–0) on top. The fixes were stronger smoothing and `min_picks`. Now Ryze (6–1 in 7 games) outranks Varus (4–0). These weights were set by judgment on all the data, **not** checked on held-out later games (see rule 5).
 
 ## Status vs the judges' questions
@@ -126,7 +138,8 @@ From data as of patch 16.17. The README holds the current wording, so keep it in
 |---|---|
 | Repeated pick/ban tendencies | **Built.** Opponent scouting and Against us tabs, plus the Ban plan. |
 | Fearless G3, G4, G5 shift | **Partly built.** The code merges games 3–5 into one "G3+" bucket. Judges ask about G3, G4 and G5 separately: show them apart, even if the sample is small (flag it), and compare to G1 and G2. |
+| Split Fearless "G3+" into G3, G4 and G5 | **Planned for Phase 2.** Each game number gets its own row with its sample size (games and W-L), and small samples are flagged. |
 | "How to win" insights | **Not built.** |
-| Live draft win-rate impact | **Not built.** Needs a model fitted on earlier games and tested on later ones (rule 5), with the held-out accuracy shown in the app. |
-| Time-based validation | **Not done.** The role inference was checked by holding out whole events, not later games. The ban-score weights were not validated on held-out games. |
+| Live draft win-rate impact | **Model built, not in the app yet.** `model.predict_draft` works on partial drafts and was validated on later games (docs/MODEL.md). Still to do: a dashboard panel that updates as picks are entered and shows the held-out accuracy and the sample sizes. Be honest on screen that the draft moves the estimate only a few points. |
+| Time-based validation | **Done for the win-probability model only.** The role inference was checked by holding out whole events, not later games. The ban-score weights were not validated on held-out games. |
 | Screenshots and demo video | **Not done.** `docs/images/` is empty, and the video link in the README is a placeholder. |

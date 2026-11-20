@@ -5,6 +5,8 @@ stl-hackathon-2026-grid-starter/
 *.parquet
 *.sqlite
 *.duckdb
+*.joblib
+*.pkl
 data_cache/
 
 # --- PyCharm: commit .idea/ (hackathon proof), but not per-user state ---
