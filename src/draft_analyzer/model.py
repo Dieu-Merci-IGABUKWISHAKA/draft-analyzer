@@ -342,13 +342,34 @@ def _weights(feats: pd.DataFrame) -> np.ndarray:
     return (1.0 / feats.groupby("game_id")["stage"].transform("size")).to_numpy()
 
 
-def fit(kind: str, feats: pd.DataFrame, C: float = DEFAULT_C):
+def fit(kind: str, feats: pd.DataFrame, C: float = DEFAULT_C, game_weight: pd.Series | None = None):
+    """game_weight: optional extra weight per game_id (bootstrap resampling)."""
     if kind != "full":                       # these features don't change during the draft
         feats = feats[feats["stage"] == FULL]
+    w = _weights(feats)
+    if game_weight is not None:
+        w = w * feats["game_id"].map(game_weight).fillna(0).to_numpy()
     model = make_model(kind, C)
     model.fit(feats[KIND_FEATURES[kind]].to_numpy(), feats["blue_won"].to_numpy(),
-              logisticregression__sample_weight=_weights(feats))
+              logisticregression__sample_weight=w)
     return model
+
+
+def bootstrap_models(feats: pd.DataFrame, C: float, n: int = 50, seed: int = 0) -> list[dict]:
+    """Refit the full model on `n` resamples of whole series. Each refit is stored as plain
+    arrays (scaler mean/scale, coefficients, intercept) for fast batch prediction; the spread
+    of their predictions is the model's uncertainty band."""
+    rng = np.random.default_rng(seed)
+    series = feats.drop_duplicates("game_id").set_index("game_id")["series_id"]
+    uniq = series.unique()
+    out = []
+    for _ in range(n):
+        counts = pd.Series(rng.integers(0, len(uniq), len(uniq))).value_counts()
+        draw = pd.Series(counts.to_numpy(), index=uniq[counts.index])
+        m = fit("full", feats, C, game_weight=series.map(draw).fillna(0))
+        sc, lr = m.steps[0][1], m.steps[-1][1]
+        out.append({"mean": sc.mean_, "scale": sc.scale_, "coef": lr.coef_[0], "intercept": float(lr.intercept_[0])})
+    return out
 
 
 def predict(model, feats: pd.DataFrame, kind: str) -> np.ndarray:
@@ -574,6 +595,7 @@ def evaluate(drafts: pd.DataFrame | None = None, verbose: bool = True) -> dict:
                   "games_red_fp": int((full_feats["blue_first_pick"] == 0).sum())},
     }
     return {"model": final, "calibrator": calibrator, "features": FEATURES, "config": asdict(cfg),
+            "bootstrap": bootstrap_models(feats, C_final),
             "trained_through": report["final"]["through"], "report": report}
 
 
@@ -588,7 +610,7 @@ def load_model(rebuild: bool = False, path: Path = MODEL_PATH) -> dict:
     import joblib
     if not rebuild and path.exists():
         bundle = joblib.load(path)
-        if bundle.get("features") == FEATURES and "calibrator" in bundle:
+        if bundle.get("features") == FEATURES and "calibrator" in bundle and "bootstrap" in bundle:
             return bundle
     bundle = evaluate(verbose=False)
     save_model(bundle, path)
@@ -638,6 +660,70 @@ def latest_lineup(actions: pd.DataFrame, team_id: str, before) -> dict[str, str]
     return dict(zip(last["role"], last["player_id"]))
 
 
+@dataclass
+class Live:
+    """Everything a live prediction needs, computed once for a history cutoff date."""
+    bundle: dict
+    cfg: FeatureConfig
+    drafts: pd.DataFrame
+    games: pd.DataFrame
+    actions: pd.DataFrame
+    hist: History
+    ratings: dict
+    names: pd.Series          # champion_id -> name
+    lookup: dict              # lower-case name or id -> champion_id
+    cutoff: pd.Timestamp
+    history_games: int
+
+
+def live_context(bundle: dict | None = None, drafts: pd.DataFrame | None = None, date=None,
+                 patch: str | None = None) -> Live:
+    df = load_drafts() if drafts is None else drafts
+    bundle = load_model() if bundle is None else bundle
+    cfg = FeatureConfig(**bundle["config"])
+    games, actions = prepare(df)
+    cutoff = games["date"].max() + pd.Timedelta(days=1) if date is None else pd.Timestamp(date)
+    prior = games[games["date"] < cutoff]
+    _, _, ratings = elo(prior, cfg.elo_k, cfg.elo_init)
+    names = df.drop_duplicates("champion_id").set_index("champion_id")["champion_name"].astype(str).sort_values()
+    lookup = {str(i).lower(): str(i) for i in names.index} | {n.lower(): str(i) for i, n in names.items()}
+    return Live(bundle=bundle, cfg=cfg, drafts=df, games=games, actions=actions,
+                hist=history_before(games, actions, cutoff, cfg, patch), ratings=ratings, names=names,
+                lookup=lookup, cutoff=cutoff, history_games=int(len(prior)))
+
+
+def draft_x(live: Live, blue_id: str, red_id: str, rows: pd.DataFrame, blue_first_pick: int):
+    """Feature dict (blue's view) for a draft given as action rows (team_id, opponent_id,
+    side, action, champion_id, role, player_id). Returns (x, per-action contributions, matchups)."""
+    rows = rows.assign(game_id="live", draft_order=0)
+    contrib = contributions(rows, live.hist)
+    mu = matchup_rows(rows[rows["action"] == "pick"], live.hist)
+    sums = contrib.groupby("team_id")[DRAFT_COLS].sum().reindex([blue_id, red_id]).fillna(0)
+    x = {"elo_diff": live.ratings.get(blue_id, live.cfg.elo_init) - live.ratings.get(red_id, live.cfg.elo_init),
+         "blue_first_pick": int(blue_first_pick)}
+    x |= {f"d_{c}": float(sums.loc[blue_id, c] - sums.loc[red_id, c]) for c in DRAFT_COLS}
+    x["matchup"] = float(mu["matchup"].sum())
+    return x, contrib, mu
+
+
+def predict_x(bundle: dict, X: np.ndarray) -> np.ndarray:
+    """Calibrated P(blue wins) for rows of FEATURES."""
+    return platt_apply(bundle["calibrator"], bundle["model"].predict_proba(np.atleast_2d(X))[:, 1])
+
+
+def predict_boot(bundle: dict, X: np.ndarray) -> np.ndarray:
+    """Calibrated P(blue wins) under every bootstrap refit: shape (n_refits, n_rows)."""
+    X = np.atleast_2d(X)
+    logits = np.stack([((X - b["mean"]) / b["scale"]) @ b["coef"] + b["intercept"] for b in bundle["bootstrap"]])
+    return platt_apply(bundle["calibrator"], 1 / (1 + np.exp(-logits)))
+
+
+def feature_push(bundle: dict, X: np.ndarray, X_ref: np.ndarray) -> np.ndarray:
+    """Per-feature change in calibrated log-odds (blue's view) going from X_ref to X."""
+    scaler, lr = bundle["model"].steps[0][1], bundle["model"].steps[-1][1]
+    return (np.atleast_2d(X) - np.atleast_2d(X_ref)) / scaler.scale_ * lr.coef_[0] * bundle["calibrator"][0]
+
+
 def predict_draft(team_a: str, team_b: str, side_a: str, picks_a=(), picks_b=(), bans=(),
                   date=None, patch: str | None = None, first_pick: str | None = None,
                   roles_a=None, roles_b=None, model: dict | None = None,
@@ -653,17 +739,14 @@ def predict_draft(team_a: str, team_b: str, side_a: str, picks_a=(), picks_b=(),
     date: only games strictly before it are used (default: day after the last game).
     patch: optional end of the meta window. first_pick: "a" or "b" (default: blue).
     """
-    df = load_drafts() if drafts is None else drafts
-    bundle = load_model() if model is None else model
-    cfg = FeatureConfig(**bundle["config"])
+    live = live_context(model, drafts, date, patch)
+    df, names, lookup, hist = live.drafts, live.names, live.lookup, live.hist
     if side_a not in ("blue", "red"):
         raise ValueError("side_a must be 'blue' or 'red'")
     a_id, b_id = _resolve_team(team_a, df), _resolve_team(team_b, df)
     if a_id == b_id:
         raise ValueError("team_a and team_b are the same team")
 
-    names = df.drop_duplicates("champion_id").set_index("champion_id")["champion_name"].astype(str)
-    lookup = {str(i).lower(): str(i) for i in names.index} | {n.lower(): str(i) for i, n in names.items()}
     pa, pb = _resolve_champions(picks_a, lookup, "picks_a"), _resolve_champions(picks_b, lookup, "picks_b")
     if isinstance(bans, dict):
         if set(bans) - {"a", "b"}:
@@ -684,41 +767,25 @@ def predict_draft(team_a: str, team_b: str, side_a: str, picks_a=(), picks_b=(),
                                   or not set(roles) <= set(ROLES)):
             raise ValueError(f"{what} must give one distinct role from {ROLES} per pick")
 
-    games, actions = prepare(df)
-    cutoff = games["date"].max() + pd.Timedelta(days=1) if date is None else pd.Timestamp(date)
-    prior = games[games["date"] < cutoff]
-    _, _, ratings = elo(prior, cfg.elo_k, cfg.elo_init)
-    hist = history_before(games, actions, cutoff, cfg, patch)
-
     side_b = "red" if side_a == "blue" else "blue"
     ra = list(roles_a) if roles_a is not None else guess_roles(a_id, pa, hist)
     rb = list(roles_b) if roles_b is not None else guess_roles(b_id, pb, hist)
-    lineup = {a_id: latest_lineup(actions, a_id, cutoff), b_id: latest_lineup(actions, b_id, cutoff)}
+    lineup = {a_id: latest_lineup(live.actions, a_id, live.cutoff), b_id: latest_lineup(live.actions, b_id, live.cutoff)}
     a_first = (side_a == "blue") if first_pick is None else (first_pick == "a")
     rows = ([(a_id, b_id, side_a, "pick", c, r, lineup[a_id].get(r)) for c, r in zip(pa, ra)]
             + [(b_id, a_id, side_b, "pick", c, r, lineup[b_id].get(r)) for c, r in zip(pb, rb)]
             + [(a_id, b_id, side_a, "ban", c, "?", None) for c in ba]
             + [(b_id, a_id, side_b, "ban", c, "?", None) for c in bb])
     rows = pd.DataFrame(rows, columns=["team_id", "opponent_id", "side", "action", "champion_id", "role", "player_id"])
-    rows = rows.assign(game_id="live", draft_order=0)
-    contrib = contributions(rows, hist)
-    mu = matchup_rows(rows[rows["action"] == "pick"], hist)
-
     blue_id, red_id = (a_id, b_id) if side_a == "blue" else (b_id, a_id)
-    sums = contrib.groupby("team_id")[DRAFT_COLS].sum().reindex([blue_id, red_id]).fillna(0)
-    x = {"elo_diff": ratings.get(blue_id, cfg.elo_init) - ratings.get(red_id, cfg.elo_init),
-         "blue_first_pick": int(a_first == (side_a == "blue"))}
-    x |= {f"d_{c}": float(sums.loc[blue_id, c] - sums.loc[red_id, c]) for c in DRAFT_COLS}
-    x["matchup"] = float(mu["matchup"].sum())
+    x, contrib, mu = draft_x(live, blue_id, red_id, rows, int(a_first == (side_a == "blue")))
+    bundle = live.bundle
     X = pd.DataFrame([x])[bundle["features"]].to_numpy()
-    raw = float(bundle["model"].predict_proba(X)[0, 1])
-    p_blue = float(platt_apply(bundle["calibrator"], raw))
+    p_blue = float(predict_x(bundle, X)[0])
     p_a = p_blue if side_a == "blue" else 1 - p_blue
-
-    scaler, lr = bundle["model"].steps[0][1], bundle["model"].steps[-1][1]
     sign = 1 if side_a == "blue" else -1
     # Each feature's push on team_a's log-odds vs an average training game, after calibration.
-    push = (X[0] - scaler.mean_) / scaler.scale_ * lr.coef_[0] * bundle["calibrator"][0] * sign
+    push = feature_push(bundle, X, bundle["model"].steps[0][1].mean_)[0] * sign
 
     contrib = contrib.assign(champion=contrib["champion_id"].map(names), matchup_vs=None,
                              matchup_games=0.0, matchup_wins=0.0)
@@ -731,11 +798,11 @@ def predict_draft(team_a: str, team_b: str, side_a: str, picks_a=(), picks_b=(),
         "team_a": a_id, "team_b": b_id, "blue": blue_id, "first_pick": a_id if a_first else b_id,
         "p_team_a": p_a, "p_team_b": 1 - p_a, "p_blue": p_blue,
         "p_team_a_elo_only": float(elo_prob(sign * x["elo_diff"])),
-        "elo": {"team_a": ratings.get(a_id, cfg.elo_init), "team_b": ratings.get(b_id, cfg.elo_init)},
+        "elo": {"team_a": live.ratings.get(a_id, live.cfg.elo_init), "team_b": live.ratings.get(b_id, live.cfg.elo_init)},
         "features_blue_view": x,
         "push": dict(zip(bundle["features"], map(float, push))),
         "roles": {"a": ra, "b": rb},
-        "history_before": str(cutoff.date()), "history_games": int(len(prior)),
+        "history_before": str(live.cutoff.date()), "history_games": live.history_games,
         "champion_window": hist.window,
         "actions": contrib,
     }

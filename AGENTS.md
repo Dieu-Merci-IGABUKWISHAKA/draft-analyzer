@@ -85,7 +85,7 @@ app/streamlit_app.py (dashboard)    notebooks/01_cloud9_scouting.py (text report
   - **Fearless:**
     - `fearless_events` detects the rule per event from repeated picks within a series ("hard" means no team ever re-picks).
     - `fearless_game_ids` lists the games in multi-game Fearless series.
-    - `fearless_by_game` gives record, distinct champions and top picks for buckets **G1 / G2 / G3+**.
+    - `fearless_by_game` gives record, distinct champions and top picks for each game number **G1 to G5**, with `small_sample` flags.
     - `series_plan` takes the champions already used and returns what the opponent loses, their likely picks now, and new bans.
 
 - **`model.py`**: draft win-probability model, P(blue side wins), described in [docs/MODEL.md](docs/MODEL.md).
@@ -95,16 +95,24 @@ app/streamlit_app.py (dashboard)    notebooks/01_cloud9_scouting.py (text report
   - **Commands:** `python src/draft_analyzer/model.py` validates and saves the model. `load_model()` loads it.
   - **`predict_draft`:** `predict_draft(team_a, team_b, side_a, picks_a, picks_b, bans, date, patch, roles_a, roles_b)` scores a partial draft. It returns the calibrated win chance, each feature's push, and the sample size behind every number.
 
+- **`simulator.py`**: the Draft simulator, described in [docs/SIMULATOR.md](docs/SIMULATOR.md).
+  - **Inputs:** `Setup` (side, first pick, game number, Fearless locks, lineups) plus a tuple of `Action`s.
+  - **`Simulator(our_id, opp_id, live)` methods:** `apply`, `set_role`, `win_chance` (with a bootstrap band), `trajectory`, `best_options` and `likely_next`.
+  - **Bans:** they are valued by the pick they deny. They are not fed into the win model.
+  - **Tendencies:** `tendency_tables`, `pick_probs` and `ban_probs` describe the opponent's habits, with fixed weights. `likely_accuracy` checks them walk-forward.
+  - **Speed:** the feature cache per draft prefix keeps each step under 1 s.
+
 ### `app/streamlit_app.py`
 
 `st.cache_data` wrappers around the `analysis` functions, then layout only.
 - **Sidebar:** matchup (us and the opponent, default LYON), recency (last N patches, default 6, and the half-life), and a slider for each ban-score weight.
 - **Header:** overall and head-to-head records.
-- **Four tabs:**
+- **Five tabs:**
   - **Opponent scouting:** champion pool chart and table, priority picks, bans by phase.
   - **Against us:** bans each side makes in head-to-head games.
   - **Ban plan:** top 5 ban cards with reasons.
-  - **Fearless series:** stats by game number, plus the series planner.
+  - **Fearless series:** stats for games 1 to 5, plus the series planner.
+  - **Draft simulator:** the board, win chance with its band, best options, and likely picks from them. Session state holds the actions; the draft is replayed through `Simulator.apply` on every rerun.
 
 Run it with `python -m streamlit run app/streamlit_app.py`.
 
@@ -113,7 +121,7 @@ Run it with `python -m streamlit run app/streamlit_app.py`.
 - `notebooks/00_check_data.py`: a smoke test that the data is reachable. It streams one Cloud9 feed.
 - `notebooks/01_cloud9_scouting.py`: a text version of the scouting report.
 - `.idea/runConfigurations/`: shared PyCharm configurations: **Dashboard (Streamlit)**, **Rebuild drafts table**, **Cloud9 scouting report**, **Train draft model**, **Tests**.
-- `docs/AI_WORKFLOW.md` (how the project was built with Claude Code), `docs/SUBMISSION.md` (Devpost text), `docs/MODEL.md` (win-probability model and validation), `docs/images/` (screenshots, still to add).
+- `docs/AI_WORKFLOW.md` (how the project was built with Claude Code), `docs/SUBMISSION.md` (Devpost text), `docs/MODEL.md` (win-probability model and validation), `docs/SIMULATOR.md` (draft simulator), `docs/images/` (screenshots, still to add).
 - `tests/`: pytest (`python -m pytest`, or the **Tests** run configuration). The tests build a synthetic drafts table, so they run without the licensed data. The real-data leakage test is skipped when the cache is missing. Test data must stay synthetic: never copy GRID rows into a fixture.
 
 ## Existing findings
@@ -135,6 +143,10 @@ From data as of patch 16.17. The README holds the current wording, so keep it in
   - **Sides:** blue won 52.3% of test games. First pick is no advantage: blue won 51.8% with first pick and 53.5% without it (243 games).
   - **Calibration:** Platt calibration did not help (log loss 0.641 → 0.645). The final calibration is nearly the identity.
   - **Phase 1 is superseded:** its single-split result (275 games, draft gain +0.011 log loss) did not hold up.
+- **Simulator "likely from them"** (walk-forward, 897 games, each prediction using only earlier games):
+  - **Picks:** the actual pick was in the top 5 44% of the time (league meta alone: 37%), and the top guess 13% of the time.
+  - **Bans:** top 5 38% of the time (meta alone: 26%).
+- **Winner's curse:** in a test draft vs LYON where Cloud9 always took the top-ranked option, the estimate climbed from 40% to 51%. The best of many noisy estimates is too high, so the simulator says so on screen.
 - **Ban score tuning history.** Version 1 over-ranked Nocturne, a champion LYON loses on (44%). Version 2 put LeBlanc (3–0) and Varus (4–0) on top. The fixes were stronger smoothing and `min_picks`. Now Ryze (6–1 in 7 games) outranks Varus (4–0). These weights were set by judgment on all the data, **not** checked on held-out later games (see rule 5).
 
 ## Status vs the judges' questions
@@ -142,9 +154,8 @@ From data as of patch 16.17. The README holds the current wording, so keep it in
 | Ask | Status |
 |---|---|
 | Repeated pick/ban tendencies | **Built.** Opponent scouting and Against us tabs, plus the Ban plan. |
-| Fearless G3, G4, G5 shift | **Partly built.** The code merges games 3–5 into one "G3+" bucket. Judges ask about G3, G4 and G5 separately: show them apart, even if the sample is small (flag it), and compare to G1 and G2. |
-| Split Fearless "G3+" into G3, G4 and G5 | **Planned for Phase 2.** Each game number gets its own row with its sample size (games and W-L), and small samples are flagged. |
+| Fearless G3, G4, G5 shift | **Built (Phase 2).** The Fearless tab shows games 1 to 5 separately, each with its record and game count. Games with fewer than 5 games are flagged, and games 4–5 carry a caption that they come only from best-of-5 series. The simulator also takes the game number and the champions locked by earlier games. |
 | "How to win" insights | **Not built.** |
-| Live draft win-rate impact | **Model built and validated (Phase 1b), not in the app yet.** `model.predict_draft` works on partial drafts. Walk-forward testing shows the draft adds no reliable accuracy beyond team strength (docs/MODEL.md). The simulator must present each pick as "how much this choice shifts the odds, according to past games", with the sample size behind it, not as a confident forecast. It should show Elo-only vs with-draft side by side, plus the held-out accuracy. |
+| Live draft win-rate impact | **Built (Phase 2): Draft simulator tab.** It shows our win chance with a 90% band beside Elo only, a chart of how it moved, the top 5 options with their shift, reason and sample sizes, and the opponent's likely next picks with their checked accuracy. It is framed as "what each choice shifts", never as a forecast. It was checked in the browser for LYON and FlyQuest. |
 | Time-based validation | **Done for the win-probability model only** (walk-forward by month, with leakage tests). The role inference was checked by holding out whole events, not later games. The ban-score weights were not validated on held-out games. |
 | Screenshots and demo video | **Not done.** `docs/images/` is empty, and the video link in the README is a placeholder. |

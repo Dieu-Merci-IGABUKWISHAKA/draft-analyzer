@@ -12,10 +12,13 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from draft_analyzer import analysis as A  # noqa: E402
+from draft_analyzer import model as M  # noqa: E402
+from draft_analyzer import simulator as S  # noqa: E402
 from draft_analyzer.config import CLOUD9_LOL_TEAM  # noqa: E402
 from draft_analyzer.drafts import load_drafts  # noqa: E402
 
@@ -35,6 +38,11 @@ st.markdown("""
            text-overflow: ellipsis; margin-bottom: 0.25rem;}
 .ban-line {margin: 0.1rem 0; font-size: 0.85rem; line-height: 1.35;}
 .ban-small {color: #d9822b;}
+.chip {display: inline-block; padding: 0.1rem 0.5rem; margin: 0.1rem; border: 1px solid #9aa0a6;
+       border-radius: 0.4rem; font-size: 0.85rem; min-width: 4.5rem; text-align: center;}
+.chip-next {border: 2px solid #f0b400; font-weight: 600;}
+.chip-empty {color: #9aa0a6;}
+.opt-ev {font-size: 0.8rem; color: #8a8f98; line-height: 1.3;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -248,8 +256,8 @@ c1.metric("Head-to-head", wl(h2h), pct_of(h2h) if h2h["games"] else "no meetings
 c2.metric(f"{our_name} overall", wl(ours), pct_of(ours), delta_color="off", delta_arrow="off")
 c3.metric(f"{opp_name} overall", wl(theirs), pct_of(theirs), delta_color="off", delta_arrow="off")
 
-tab_scout, tab_vs, tab_plan, tab_fearless = st.tabs(["Opponent scouting", "Against us", "Ban plan",
-                                                     "Fearless series"])
+tab_scout, tab_vs, tab_plan, tab_fearless, tab_sim = st.tabs(["Opponent scouting", "Against us", "Ban plan",
+                                                              "Fearless series", "Draft simulator"])
 
 # --- tab: opponent scouting --------------------------------------------------------------
 with tab_scout:
@@ -407,29 +415,31 @@ with tab_fearless:
     if summ["games"].sum() == 0:
         st.info("No Fearless series games in this window.")
     else:
-        cols = st.columns(3)
+        cols = st.columns(len(A.FEARLESS_ORDER))
         for col, r in zip(cols, summ.itertuples()):
-            label = {"G1": "Game 1", "G2": "Game 2", "G3+": "Game 3+"}[r.game]
-            wr = f"{r.win_rate:.0%} win rate" if r.games else "no games"
-            col.metric(f"{label}  ({r.games} games)", r.record.replace("-", "–") if r.games else "–",
-                       f"{wr} · {r.distinct_champions} different champions", delta_color="off", delta_arrow="off")
+            col.metric(f"Game {r.game[1:]}", r.record.replace("-", "–") if r.games else "–",
+                       f"{r.games} games" + (f" · {r.win_rate:.0%}" if r.games else ""), delta_color="off",
+                       delta_arrow="off", help=f"{r.games} games, {r.distinct_champions} different champions")
             if r.small_sample:
-                col.markdown(":orange[Small sample]")
-        cols = st.columns(3)
+                col.markdown(":orange[Small sample]", help=f"Fewer than {A.SMALL_SAMPLE} games")
+        st.caption("Games 4 and 5 only happen in best-of-5 series, so their samples are small: read them as anecdotes. "
+                   "Champions = how many different champions they played in that game number; it rises in later "
+                   "games because Fearless removes the ones already used.")
         tp = fb["top_picks"]
-        for col, g in zip(cols, ["G1", "G2", "G3+"]):
+        for tab, g in zip(st.tabs([f"Most picked in game {g[1:]}" for g in A.FEARLESS_ORDER]), A.FEARLESS_ORDER):
             part = tp[tp["game"] == g]
-            col.markdown(f"**Most picked in {g}**")
+            n_games = int(summ.loc[summ["game"] == g, "games"].iloc[0])
             if part.empty:
-                col.info("No games.")
+                tab.info("No games.")
                 continue
-            col.dataframe(part.assign(pick_rate=part["pick_rate"] * 100), hide_index=True, width="stretch",
+            if n_games < A.SMALL_SAMPLE:
+                tab.warning(f"Only {n_games} game{'s' if n_games != 1 else ''}: too few to call this a tendency.")
+            tab.dataframe(part.assign(pick_rate=part["pick_rate"] * 100), hide_index=True, width="stretch",
                           column_order=["champion", "role", "picks", "pick_rate"],
-                          column_config={"champion": "Champion", "role": "Role (inferred)", "picks": "Picks",
+                          column_config={"champion": "Champion", "role": "Role (inferred)",
+                                         "picks": st.column_config.NumberColumn("Picks", help=f"Out of {n_games} games"),
                                          "pick_rate": st.column_config.ProgressColumn(
-                                             "Of games", format="%.0f%%", min_value=0, max_value=100)})
-        st.caption("Distinct champions = how many different champions they played in that game number. "
-                   "It rises in later games because Fearless removes the ones already used.")
+                                             f"Of {n_games} games", format="%.0f%%", min_value=0, max_value=100)})
 
     st.subheader("Series planner")
     st.caption(f"Mark the champions already played earlier in this series. Rule applied: {rule} Fearless "
@@ -477,6 +487,236 @@ with tab_fearless:
                 with col:
                     ban_card(rank, r)
                 rank += 1
+
+# --- tab: draft simulator -------------------------------------------------------------------
+@st.cache_resource(show_spinner="Loading the win model (first run trains it: about a minute)...")
+def get_live():
+    return M.live_context(drafts=load_drafts())
+
+
+@st.cache_resource(show_spinner="Preparing the simulator...")
+def get_sim(our, opp):
+    return S.Simulator(our, opp, get_live())
+
+
+@st.cache_data(show_spinner="Checking 'likely picks' against past games (first run: about a minute)...")
+def likely_accuracy() -> pd.DataFrame:
+    return S.load_likely_accuracy(get_live())
+
+
+def sim_apply(skey, sim, setup, champ, role):
+    try:
+        st.session_state[skey] = sim.apply(setup, st.session_state.get(skey, ()), champ, role)
+    except ValueError as e:
+        st.session_state[skey + "_err"] = str(e)
+
+
+def sim_set_role(skey, sim, setup, slot, widget):
+    st.session_state[skey] = sim.set_role(setup, st.session_state.get(skey, ()), slot, st.session_state[widget])
+
+
+def sim_undo(skey):
+    st.session_state[skey] = st.session_state.get(skey, ())[:-1]
+
+
+def sim_reset(skey):
+    st.session_state[skey] = ()
+
+
+ROLE_SHORT = {"top": "Top", "jungle": "Jgl", "mid": "Mid", "bot": "Bot", "support": "Sup"}
+
+
+def chip(text: str, cls: str = "") -> str:
+    return f'<span class="chip {cls}">{html.escape(text)}</span>'
+
+
+with tab_sim:
+    what_this_means("play a draft pick by pick and see what each choice shifts. The model's draft effect is small "
+                    "(about 3 points over a whole draft) and team strength matters more, so read every number as a "
+                    "nudge backed by past games, not as a prediction of who wins.")
+    sim = get_sim(our_id, opp_id)
+    champ_names = sim.live.names
+    key = f"{our_id}_{opp_id}"
+    skey = f"sim_actions_{key}"
+    team_label = {"us": our_name, "them": opp_name}
+
+    s1, s2, s3 = st.columns(3)
+    our_side = s1.radio("Our side", ["blue", "red"], horizontal=True, key=f"sim_side_{key}",
+                        format_func=str.capitalize)
+    first = s2.radio("First pick (first selection)", ["us", "them"], horizontal=True, key=f"sim_first_{key}",
+                     format_func=team_label.get,
+                     help="Since 2026 the team with first selection chooses side or first pick, so set both.")
+    game_no = s3.selectbox("Game in the series", [1, 2, 3, 4, 5], key=f"sim_game_{key}")
+    locked = st.multiselect("Champions used in earlier games of this series (hard Fearless: locked for both teams)",
+                            list(champ_names.index), format_func=champ_names.get, key=f"sim_locked_{key}",
+                            disabled=game_no == 1, placeholder="Type to search...")
+    if game_no == 1:
+        locked = []
+    with st.expander("Lineups: each team's last game. Change a player if a substitute plays."):
+        lineups = {}
+        for col, who in zip(st.columns(2), ("us", "them")):
+            roster, default = sim.roster(who), sim.default_lineup(who)
+            col.markdown(f"**{team_label[who]}**")
+            label = {r.player_id: f"{r.name} ({r.role}, {r.games} games)" for r in roster.itertuples()}
+            chosen = []
+            for role in S.ROLES:
+                opts = list(dict.fromkeys(([default[role]] if role in default else [])
+                                          + list(roster.loc[roster["role"] == role, "player_id"])
+                                          + list(roster["player_id"])))
+                if opts:
+                    pid = col.selectbox(role.capitalize(), opts, key=f"sim_lineup_{key}_{who}_{role}",
+                                        format_func=lambda p, label=label: label.get(p, sim.player_names.get(p, p)))
+                    chosen.append((role, pid))
+            lineups[who] = tuple(chosen)
+    setup = S.Setup(our_side=our_side, we_first=first == "us", game_number=game_no, locked=frozenset(locked),
+                    lineup_us=lineups["us"], lineup_them=lineups["them"])
+
+    # Replay the stored draft against the current settings; cut it where it became illegal.
+    acts = ()
+    for a in st.session_state.get(skey, ()):
+        try:
+            acts = sim.apply(setup, acts, a.champion_id, a.role)
+        except ValueError as e:
+            st.warning(f"Draft cut back to before {champ_names[a.champion_id]}: {e}")
+            break
+    st.session_state[skey] = acts
+    if err := st.session_state.pop(skey + "_err", None):
+        st.error(err)
+
+    board = S.slots(setup)
+    nxt = board[len(acts)] if len(acts) < S.N_SLOTS else None
+    by_slot = {a.slot: a for a in acts}
+
+    # --- board ---
+    for col, side in zip(st.columns(2), ("blue", "red")):
+        who = "us" if side == our_side else "them"
+        lineup = sim.lineup(setup, who)
+        with col:
+            first_txt = " · first pick" if (who == "us") == setup.we_first else ""
+            st.markdown(f"#### :{side}[{side.capitalize()}] · {team_label[who]}{first_txt}")
+            chips = []
+            for s in (s for s in board if s["side"] == side and s["kind"] == "ban"):
+                a = by_slot.get(s["slot"])
+                is_next = nxt is not None and nxt["slot"] == s["slot"]
+                chips.append(chip(champ_names[a.champion_id] if a else s["label"],
+                                  "chip-next" if is_next else ("" if a else "chip-empty")))
+            st.markdown("Bans " + "".join(chips), unsafe_allow_html=True)
+            for s in (s for s in board if s["side"] == side and s["kind"] == "pick"):
+                a = by_slot.get(s["slot"])
+                is_next = nxt is not None and nxt["slot"] == s["slot"]
+                c1, c2 = st.columns([1.7, 1.3], vertical_alignment="center")
+                label = f"<b>▶ {s['label']}</b>" if is_next else s["label"]
+                if a:
+                    player = html.escape(sim.player_names.get(lineup.get(a.role), ""))
+                    c1.markdown(f"<span style='white-space:nowrap'>{label}</span> · "
+                                f"<b>{html.escape(champ_names[a.champion_id])}</b> · {player}", unsafe_allow_html=True)
+                    wkey = f"sim_role_{key}_{s['slot']}_{a.champion_id}_{a.role}"
+                    c2.selectbox("Role", S.ROLES, index=S.ROLES.index(a.role), key=wkey, label_visibility="collapsed",
+                                 format_func=ROLE_SHORT.get,
+                                 on_change=sim_set_role, args=(skey, sim, setup, s["slot"], wkey))
+                else:
+                    c1.markdown(f"<span style='white-space:nowrap'>{label}</span> · <span style='color:#9aa0a6'>–</span>",
+                                unsafe_allow_html=True)
+
+    # --- next action ---
+    if nxt is None:
+        st.success("Draft complete.")
+    else:
+        st.markdown(f"**Next: {nxt['label']} · {team_label[nxt['who']]} ({nxt['side']})**")
+    a1, a2 = st.columns([3, 2], vertical_alignment="bottom")
+    a3, a4, a5, _ = st.columns([1.3, 1, 1, 2])
+    champ, role = None, None
+    if nxt is not None:
+        gone = sim.unavailable(setup, acts)
+        champ = a1.selectbox("Champion", [c for c in champ_names.index if c not in gone], index=None,
+                             placeholder="Type to search...", format_func=champ_names.get,
+                             key=f"sim_choice_{key}_{len(acts)}")
+        if nxt["kind"] == "pick":
+            open_r = sim.open_roles(setup, acts, nxt["who"])
+            guess = sim.guess_role(setup, acts, nxt["who"], champ) if champ else open_r[0]
+            role = a2.selectbox("Role", open_r, index=open_r.index(guess), key=f"sim_newrole_{key}_{len(acts)}_{champ}",
+                                help="Defaults to the role this team usually plays the champion in.")
+        a3.button("Lock in", type="primary", disabled=champ is None, on_click=sim_apply,
+                  args=(skey, sim, setup, champ, role), key=f"sim_lock_{key}")
+    a4.button("Undo", disabled=not acts, on_click=sim_undo, args=(skey,), key=f"sim_undo_{key}")
+    a5.button("Reset", disabled=not acts, on_click=sim_reset, args=(skey,), key=f"sim_reset_{key}")
+
+    # --- win chance ---
+    st.divider()
+    wc, traj = sim.win_chance(setup, acts), sim.trajectory(setup, acts)
+    m1, m2 = st.columns([1, 2.4])
+    m1.metric("Our win chance", f"{wc['p']:.0%}", f"90% range {wc['lo']:.0%}–{wc['hi']:.0%}",
+              delta_color="off", delta_arrow="off",
+              help=f"Range = spread across {wc['refits']} refits of the model on resampled series: how sure the "
+                   f"model is of its own estimate. Any single game is far less certain.")
+    m1.metric("Team strength only", f"{wc['p_elo']:.0%}", f"Elo {wc['elo_us']:.0f} vs {wc['elo_them']:.0f}",
+              delta_color="off", delta_arrow="off")
+    fig = go.Figure([
+        go.Scatter(x=traj["step"], y=traj["hi"] * 100, mode="lines", line={"width": 0}, hoverinfo="skip",
+                   showlegend=False),
+        go.Scatter(x=traj["step"], y=traj["lo"] * 100, mode="lines", line={"width": 0}, fill="tonexty",
+                   fillcolor="rgba(76,120,168,0.2)", name="90% range", hoverinfo="skip"),
+        go.Scatter(x=traj["step"], y=traj["p"] * 100, mode="lines+markers", line={"color": "#4C78A8"},
+                   name="Win chance", customdata=traj["label"],
+                   hovertemplate="%{customdata}<br>%{y:.1f}%<extra></extra>"),
+    ])
+    fig.add_hline(y=50, line={"color": GREY, "dash": "dot", "width": 1})
+    fig.update_layout(height=260, margin={"l": 10, "r": 10, "t": 10, "b": 10}, showlegend=False,
+                      yaxis={"title": f"{our_name} win %", "range": [max(0, traj["lo"].min() * 100 - 5),
+                                                                       min(100, traj["hi"].max() * 100 + 5)]},
+                      xaxis={"tickmode": "array", "tickvals": traj["step"], "ticktext": traj["short"],
+                             "range": [-0.5, S.N_SLOTS + 0.5]})
+    m2.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+    st.caption("**The draft typically shifts odds by about 3 points; team strength matters more.** In testing on "
+               "897 later games the draft added no reliable accuracy beyond team strength (docs/MODEL.md). "
+               "Bans don't move this line directly; their value shows in what they deny. Always taking the top "
+               "option below overstates the gain, because the best of many noisy estimates is usually too high.")
+
+    # --- best options / likely from them ---
+    o1, o2 = st.columns(2)
+    with o1:
+        st.markdown(f"**Best options for {our_name}**")
+        best = sim.best_options(setup, acts)
+        if nxt is None:
+            st.caption("Draft complete.")
+        elif best is None:
+            st.caption(f"{opp_name}'s turn: see their likely choices.")
+        elif best.empty:
+            st.caption("No candidates for the open roles.")
+        else:
+            if nxt["kind"] == "pick":
+                st.caption("Points = change in our win chance if we pick it now, with the 90% range across model refits.")
+            else:
+                st.caption("Points = chance they pick it later in this draft × how much worse it is for us than their "
+                           "typical pick. Role = theirs.")
+            for r in best.itertuples():
+                st.button(f"{nxt['kind'].capitalize()} {r.champion}", key=f"sim_opt_{key}_{len(acts)}_{r.champion_id}",
+                          on_click=sim_apply,
+                          args=(skey, sim, setup, r.champion_id, r.role if nxt["kind"] == "pick" else None))
+                st.markdown(f"**{r.shift_pts:+.1f}** pts ({r.lo_pts:+.1f} to {r.hi_pts:+.1f}) · {r.role} · {r.reason}"
+                            f"<div class='opt-ev'>{html.escape(r.evidence)}</div>", unsafe_allow_html=True)
+    with o2:
+        ln = sim.likely_next(setup, acts)
+        if ln is None:
+            st.markdown(f"**Likely from {opp_name}**")
+            st.caption("No more actions for them.")
+        else:
+            when = "now" if nxt is not None and nxt["slot"] == ln["slot"]["slot"] else "their next turn"
+            st.markdown(f"**Likely from {opp_name}: {ln['slot']['label']} ({when})**")
+            t = ln["table"]
+            st.dataframe(t.assign(prob=t["prob"] * 100), hide_index=True, width="stretch",
+                         column_order=["champion"] + (["role"] if ln["kind"] == "pick" else []) + ["prob", "evidence"],
+                         column_config={"champion": "Champion", "role": "Role",
+                                        "prob": st.column_config.ProgressColumn("Chance", format="%.0f%%",
+                                                                                min_value=0, max_value=100),
+                                        "evidence": st.column_config.TextColumn("Evidence", width="large")})
+            acc = likely_accuracy().set_index(["kind", "method"])
+            ours_acc, meta_acc = acc.loc[(ln["kind"], "tendency")], acc.loc[(ln["kind"], "meta only")]
+            st.caption(f"From their habits by draft phase over the last year, the league meta, their open roles and "
+                       f"what's still available. Checked on {int(ours_acc['predictions']):,} past {ln['kind']}s in "
+                       f"{int(ours_acc['games'])} games, each using only earlier games: the actual {ln['kind']} was in "
+                       f"this top 5 {ours_acc['top5']:.0%} of the time (league meta alone: {meta_acc['top5']:.0%}).")
+
 
 # --- footer --------------------------------------------------------------------------------
 st.divider()

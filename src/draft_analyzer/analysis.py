@@ -323,7 +323,7 @@ def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict
 # --- Fearless Draft -----------------------------------------------------------------------
 # Fearless: a champion picked in one game of a series can't be picked again later in that
 # series. "hard" = by either team, "soft" = by the same team only.
-FEARLESS_ORDER = ["G1", "G2", "G3+"]
+FEARLESS_ORDER = ["G1", "G2", "G3", "G4", "G5"]
 
 
 def fearless_events(drafts: pd.DataFrame | None = None, min_series: int = 3) -> pd.DataFrame:
@@ -358,14 +358,14 @@ def fearless_game_ids(drafts: pd.DataFrame | None = None) -> set[str]:
 
 
 def _bucket(game_number: pd.Series) -> pd.Series:
-    return game_number.astype(int).map(lambda g: "G1" if g == 1 else "G2" if g == 2 else "G3+")
+    return game_number.astype(int).clip(upper=5).map(lambda g: f"G{g}")
 
 
 def fearless_by_game(team_id: str, last_patches: int | None = None, top: int = 5,
                      drafts: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
     """How a team drafts by game number in Fearless series.
 
-    Returns {"summary": one row per G1/G2/G3+ (games, record, win rate, distinct
+    Returns {"summary": one row per G1..G5 (games, record, win rate, distinct
     champions, picks), "top_picks": their `top` most-picked champions per bucket}.
     """
     df = _drafts(drafts)

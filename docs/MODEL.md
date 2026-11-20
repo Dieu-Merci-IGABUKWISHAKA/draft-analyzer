@@ -202,6 +202,12 @@ r["actions"]             # each pick/ban with the sample sizes behind every numb
   - total history games.
 - **Checks:** it raises a clear error for unknown teams or champions, more than 5 picks, a champion used twice, or invalid roles.
 
+### Uncertainty band and batch scoring
+
+The saved model also holds **50 bootstrap refits** of the full model, each fitted on a resample of whole series. `predict_boot` scores a draft under all of them, and the simulator shows the 5th–95th percentile as the 90% range.
+
+The simulator scores many drafts at once through `live_context` (history, ratings and names, computed once), `draft_x`, `predict_x` and `feature_push`. `predict_draft` uses the same helpers. See [SIMULATOR.md](SIMULATOR.md).
+
 ## Tests
 
 `tests/test_model.py`. The tests use a made-up drafts table, so no licensed data is needed or stored:
