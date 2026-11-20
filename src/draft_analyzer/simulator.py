@@ -24,9 +24,11 @@ Hard Fearless: champions used earlier in the series are locked for both teams.
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -43,20 +45,20 @@ ROLES = M.ROLES
 N_SLOTS = len(DRAFT_TEMPLATE)
 
 # "Likely from them": fixed in advance, checked walk-forward (likely_accuracy).
-TENDENCY_DAYS = 365          # look-back for team tendencies and role habits
-TENDENCY_HALF_LIFE = 3.0     # patches until a game counts half
-TEAM_WEIGHT = 0.7            # team tendency vs league meta for picks
-OTHER_PHASE_WEIGHT = 0.3     # a champion picked in the other pick phase still counts this much
-BAN_WEIGHTS = {"team": 0.5, "meta": 0.25, "target": 0.25}   # their ban habits / league / what we play
-MIN_ROLE_GAMES = 2           # a champion is a candidate for a role only with this many pro games there
+TENDENCY_DAYS = 365  # look-back for team tendencies and role habits
+TENDENCY_HALF_LIFE = 3.0  # patches until a game counts half
+TEAM_WEIGHT = 0.7  # team tendency vs league meta for picks
+OTHER_PHASE_WEIGHT = 0.3  # a champion picked in the other pick phase still counts this much
+BAN_WEIGHTS = {"team": 0.5, "meta": 0.25, "target": 0.25}  # their ban habits / league / what we play
+MIN_ROLE_GAMES = 2  # a champion is a candidate for a role only with this many pro games there
 
-REASONS = {   # model features behind each reason, as shown to coaches
+REASONS = {  # model features behind each reason, as shown to coaches
     "player comfort": ["d_player_games", "d_player_edge"],
     "team comfort": ["d_team_games", "d_team_edge"],
     "lane matchup": ["matchup"],
     "meta strength": ["d_champ_wr", "d_presence", "d_priority"],
 }
-BAND = (5, 95)               # percentiles of the bootstrap refits shown as the uncertainty band
+BAND = (5, 95)  # percentiles of the bootstrap refits shown as the uncertainty band
 LIKELY_EVAL_PATH = CACHE_DIR / "likely_eval.joblib"
 
 
@@ -64,11 +66,12 @@ LIKELY_EVAL_PATH = CACHE_DIR / "likely_eval.joblib"
 @dataclass(frozen=True)
 class Setup:
     """Everything about the game except the draft actions. Hashable, for caching."""
+
     our_side: str = "blue"
-    we_first: bool = True                  # do we make the first pick (slot 7)?
-    game_number: int = 1                   # in the series; Fearless locks come from earlier games
-    locked: frozenset = frozenset()        # champion_ids used earlier in the series (hard Fearless)
-    lineup_us: tuple = ()                  # ((role, player_id), ...); missing roles use the last lineup
+    we_first: bool = True  # do we make the first pick (slot 7)?
+    game_number: int = 1  # in the series; Fearless locks come from earlier games
+    locked: frozenset = frozenset()  # champion_ids used earlier in the series (hard Fearless)
+    lineup_us: tuple = ()  # ((role, player_id), ...); missing roles use the last lineup
     lineup_them: tuple = ()
 
     def __post_init__(self):
@@ -80,9 +83,12 @@ class Setup:
 
 @dataclass(frozen=True)
 class Action:
-    slot: int                 # 1-20
+    slot: int  # 1-20
     champion_id: str
-    role: str | None = None   # picks only
+    role: str | None = None  # picks only
+
+
+Actions = Sequence[Action]  # the draft so far, in slot order
 
 
 def slots(setup: Setup) -> list[dict]:
@@ -93,8 +99,16 @@ def slots(setup: Setup) -> list[dict]:
         n[kind] += 1
         phase = (1 if i in PHASE1_PICKS else 2) if kind == "pick" else (1 if i <= 6 else 2)
         side = setup.our_side if who == "us" else ("red" if setup.our_side == "blue" else "blue")
-        out.append({"slot": i, "who": who, "kind": kind, "phase": phase, "side": side,
-                    "label": f"{kind.capitalize()} {n[kind]}"})
+        out.append(
+            {
+                "slot": i,
+                "who": who,
+                "kind": kind,
+                "phase": phase,
+                "side": side,
+                "label": f"{kind.capitalize()} {n[kind]}",
+            }
+        )
     return out
 
 
@@ -103,13 +117,14 @@ def slots(setup: Setup) -> list[dict]:
 class Tendencies:
     """Pick/ban habits of every team over the TENDENCY_DAYS before a date, as dense arrays
     over `champs`. Recency-weighted by patch; raw counts kept for the evidence shown."""
+
     champs: pd.Index
-    picks: pd.DataFrame            # team_id, ci, phase, w, role
-    bans: pd.DataFrame             # team_id, ci, phase, w
-    games: pd.DataFrame            # team_id -> games (raw), w_games
-    meta_pick: dict                # phase -> share array
+    picks: pd.DataFrame  # team_id, ci, phase, w, role
+    bans: pd.DataFrame  # team_id, ci, phase, w
+    games: pd.DataFrame  # team_id -> games (raw), w_games
+    meta_pick: dict  # phase -> share array
     meta_ban: dict
-    role_global: np.ndarray        # champs x 5 pick counts
+    role_global: np.ndarray  # champs x 5 pick counts
     _team: dict = field(default_factory=dict)
 
     def team(self, team_id: str) -> dict:
@@ -135,12 +150,14 @@ class Tendencies:
     def role_probs(self, team_id: str) -> np.ndarray:
         """P(role | champion) for this team: its own habits plus the league's (champs x 5)."""
         g = self.role_global
-        frac = np.divide(g, g.sum(axis=1, keepdims=True), out=np.full_like(g, 0.2), where=g.sum(axis=1, keepdims=True) > 0)
+        frac = np.divide(
+            g, g.sum(axis=1, keepdims=True), out=np.full_like(g, 0.2), where=g.sum(axis=1, keepdims=True) > 0
+        )
         r = self.team(team_id)["roles"] + 2 * frac + 0.02
         return r / r.sum(axis=1, keepdims=True)
 
 
-def tendency_tables(actions: pd.DataFrame, before, champs: pd.Index) -> Tendencies:
+def tendency_tables(actions: pd.DataFrame, before: str | pd.Timestamp, champs: pd.Index) -> Tendencies:
     """Habits from games strictly before `before` (and within TENDENCY_DAYS)."""
     before = pd.Timestamp(before)
     a = actions[(actions["date"] < before) & (actions["date"] >= before - pd.Timedelta(days=TENDENCY_DAYS))]
@@ -150,29 +167,39 @@ def tendency_tables(actions: pd.DataFrame, before, champs: pd.Index) -> Tendenci
     a["w"] = 0.5 ** ((len(patches) - 1 - a["patch"].map(pidx).fillna(0)) / TENDENCY_HALF_LIFE)
     a["ci"] = a["champion_id"].map({c: i for i, c in enumerate(champs)}).astype(int)
     pick = a["action"] == "pick"
-    a["phase"] = np.where(pick, np.where(a["draft_order"].isin(PHASE1_PICKS), 1, 2),
-                          np.where(a["draft_order"] <= 6, 1, 2))
+    a["phase"] = np.where(
+        pick, np.where(a["draft_order"].isin(PHASE1_PICKS), 1, 2), np.where(a["draft_order"] <= 6, 1, 2)
+    )
     picks, bans = a[pick], a[~pick]
     n = len(champs)
 
-    def share(df):
+    def share(df: pd.DataFrame) -> np.ndarray:
         c = np.bincount(df["ci"], minlength=n).astype(float)
         return c / c.sum() if c.sum() else np.full(n, 1 / n)
 
     role_global = np.zeros((n, len(ROLES)))
     known = picks[picks["role"].isin(ROLES)]
     np.add.at(role_global, (known["ci"].to_numpy(dtype=int), known["role"].map(ROLES.index).to_numpy(dtype=int)), 1)
-    games = (a.drop_duplicates(["game_id", "team_id"]).groupby("team_id")["w"]
-             .agg(games="size", w_games="sum"))
-    return Tendencies(champs=champs, picks=picks[["team_id", "ci", "phase", "w", "role"]],
-                      bans=bans[["team_id", "ci", "phase", "w"]], games=games,
-                      meta_pick={ph: share(picks[picks["phase"] == ph]) for ph in (1, 2)},
-                      meta_ban={ph: share(bans[bans["phase"] == ph]) for ph in (1, 2)},
-                      role_global=role_global)
+    games = a.drop_duplicates(["game_id", "team_id"]).groupby("team_id")["w"].agg(games="size", w_games="sum")
+    return Tendencies(
+        champs=champs,
+        picks=picks[["team_id", "ci", "phase", "w", "role"]],
+        bans=bans[["team_id", "ci", "phase", "w"]],
+        games=games,
+        meta_pick={ph: share(picks[picks["phase"] == ph]) for ph in (1, 2)},
+        meta_ban={ph: share(bans[bans["phase"] == ph]) for ph in (1, 2)},
+        role_global=role_global,
+    )
 
 
-def pick_probs(tend: Tendencies, team_id: str, phase: int, open_roles: list[str], available: np.ndarray,
-               team_weight: float = TEAM_WEIGHT) -> np.ndarray:
+def pick_probs(
+    tend: Tendencies,
+    team_id: str,
+    phase: int,
+    open_roles: list[str],
+    available: np.ndarray,
+    team_weight: float = TEAM_WEIGHT,
+) -> np.ndarray:
     """P(team picks each champion next), over available champions that fit an open role."""
     t = tend.team(team_id)
     tw = t[f"pick_w{phase}"] + OTHER_PHASE_WEIGHT * t[f"pick_w{3 - phase}"]
@@ -184,13 +211,13 @@ def pick_probs(tend: Tendencies, team_id: str, phase: int, open_roles: list[str]
     return p / p.sum() if p.sum() > 0 else p
 
 
-def ban_probs(tend: Tendencies, team_id: str, target_id: str, phase: int, available: np.ndarray,
-              weights: dict = BAN_WEIGHTS) -> np.ndarray:
+def ban_probs(
+    tend: Tendencies, team_id: str, target_id: str, phase: int, available: np.ndarray, weights: dict = BAN_WEIGHTS
+) -> np.ndarray:
     """P(team bans each champion next): its ban habits in this phase, the league's, and
     what the target team plays."""
     t, tt = tend.team(team_id), tend.team(target_id)
-    parts = {"team": t[f"ban_w{phase}"], "meta": tend.meta_ban[phase],
-             "target": tt["pick_w1"] + tt["pick_w2"]}
+    parts = {"team": t[f"ban_w{phase}"], "meta": tend.meta_ban[phase], "target": tt["pick_w1"] + tt["pick_w2"]}
     p = np.full(len(tend.champs), 1e-4)
     used = {k: v for k, v in parts.items() if v.sum() > 0}
     total_w = sum(weights[k] for k in used)
@@ -213,7 +240,7 @@ class Simulator:
         self.tend = tendency_tables(live.actions, live.cutoff, self.champs)
         self.F = list(live.bundle["features"])
         self.fi = {f: i for i, f in enumerate(self.F)}
-        self._xcache: dict = {}        # (setup, actions) -> features: each click adds one prefix
+        self._xcache: dict = {}  # (setup, actions) -> features: each click adds one prefix
         self._lineups: dict = {}
 
     # --- people ---------------------------------------------------------------------------
@@ -228,12 +255,19 @@ class Simulator:
     def roster(self, who: str) -> pd.DataFrame:
         """Players who played for the team in the tendency window: id, name, main role, games."""
         a = self.live.actions
-        a = a[(a["team_id"] == self.team_id(who)) & (a["action"] == "pick") & a["player_id"].notna()
-              & (a["date"] >= self.live.cutoff - pd.Timedelta(days=TENDENCY_DAYS))]
+        a = a[
+            (a["team_id"] == self.team_id(who))
+            & (a["action"] == "pick")
+            & a["player_id"].notna()
+            & (a["date"] >= self.live.cutoff - pd.Timedelta(days=TENDENCY_DAYS))
+        ]
         if a.empty:
             return pd.DataFrame(columns=["player_id", "name", "role", "games", "last_played"])
-        out = a.groupby("player_id").agg(games=("game_id", "nunique"), last_played=("date", "max"),
-                                         role=("role", lambda r: r.value_counts().index[0]))
+        out = a.groupby("player_id").agg(
+            games=("game_id", "nunique"),
+            last_played=("date", "max"),
+            role=("role", lambda r: r.value_counts().index[0]),
+        )
         out["name"] = self.player_names.reindex(out.index).fillna(out.index.to_series())
         return out.reset_index().sort_values(["role", "last_played"], ascending=[True, False])
 
@@ -247,27 +281,27 @@ class Simulator:
         return self.default_lineup(who) | dict(setup.lineup_us if who == "us" else setup.lineup_them)
 
     # --- board state ----------------------------------------------------------------------
-    def unavailable(self, setup: Setup, actions) -> set[str]:
+    def unavailable(self, setup: Setup, actions: Actions) -> set[str]:
         return set(setup.locked) | {a.champion_id for a in actions}
 
-    def available_mask(self, setup: Setup, actions) -> np.ndarray:
+    def available_mask(self, setup: Setup, actions: Actions) -> np.ndarray:
         gone = self.unavailable(setup, actions)
         return np.array([c not in gone for c in self.champs], dtype=float)
 
-    def picks_of(self, setup: Setup, actions, who: str) -> list[Action]:
+    def picks_of(self, setup: Setup, actions: Actions, who: str) -> list[Action]:
         s = slots(setup)
         return [a for a in actions if s[a.slot - 1]["who"] == who and s[a.slot - 1]["kind"] == "pick"]
 
-    def open_roles(self, setup: Setup, actions, who: str) -> list[str]:
+    def open_roles(self, setup: Setup, actions: Actions, who: str) -> list[str]:
         taken = {a.role for a in self.picks_of(setup, actions, who)}
         return [r for r in ROLES if r not in taken]
 
-    def guess_role(self, setup: Setup, actions, who: str, champion_id: str) -> str:
+    def guess_role(self, setup: Setup, actions: Actions, who: str, champion_id: str) -> str:
         open_r = self.open_roles(setup, actions, who) or ROLES
         rp = self.tend.role_probs(self.team_id(who))[self.cidx[champion_id]]
         return max(open_r, key=lambda r: rp[ROLES.index(r)])
 
-    def apply(self, setup: Setup, actions, champion_id: str, role: str | None = None) -> tuple:
+    def apply(self, setup: Setup, actions: Actions, champion_id: str, role: str | None = None) -> tuple:
         """The draft with the next slot filled. Raises ValueError for an illegal action."""
         actions = tuple(actions)
         if len(actions) >= N_SLOTS:
@@ -287,7 +321,7 @@ class Simulator:
                 raise ValueError(f"role {role!r} is already filled for this team")
         return actions + (Action(slot["slot"], champion_id, role),)
 
-    def set_role(self, setup: Setup, actions, slot: int, role: str) -> tuple:
+    def set_role(self, setup: Setup, actions: Actions, slot: int, role: str) -> tuple:
         """Change a pick's role; if a teammate already has that role, the two swap."""
         actions = list(actions)
         i = next(i for i, a in enumerate(actions) if a.slot == slot)
@@ -302,7 +336,7 @@ class Simulator:
     def _side_ids(self, setup: Setup) -> tuple[str, str]:
         return (self.us, self.them) if setup.our_side == "blue" else (self.them, self.us)
 
-    def _rows(self, setup: Setup, actions) -> pd.DataFrame:
+    def _rows(self, setup: Setup, actions: Actions) -> pd.DataFrame:
         """Model rows for the picks so far (bans are left out of the win model, see module doc)."""
         s, lineups = slots(setup), {w: self.lineup(setup, w) for w in ("us", "them")}
         rows = []
@@ -310,36 +344,54 @@ class Simulator:
             sl = s[a.slot - 1]
             if sl["kind"] == "pick":
                 who = sl["who"]
-                rows.append((self.team_id(who), self.team_id("them" if who == "us" else "us"), sl["side"],
-                             "pick", a.champion_id, a.role, lineups[who].get(a.role)))
-        return pd.DataFrame(rows, columns=["team_id", "opponent_id", "side", "action", "champion_id", "role",
-                                           "player_id"])
+                rows.append(
+                    (
+                        self.team_id(who),
+                        self.team_id("them" if who == "us" else "us"),
+                        sl["side"],
+                        "pick",
+                        a.champion_id,
+                        a.role,
+                        lineups[who].get(a.role),
+                    )
+                )
+        return pd.DataFrame(
+            rows, columns=["team_id", "opponent_id", "side", "action", "champion_id", "role", "player_id"]
+        )
 
-    def _x(self, setup: Setup, actions) -> tuple[np.ndarray, pd.DataFrame, pd.DataFrame]:
+    def _x(self, setup: Setup, actions: Actions) -> tuple[np.ndarray, pd.DataFrame, pd.DataFrame]:
         key = (setup, tuple(actions))
         if key not in self._xcache:
             if len(self._xcache) > 5000:
                 self._xcache.clear()
             blue, red = self._side_ids(setup)
-            x, contrib, mu = M.draft_x(self.live, blue, red, self._rows(setup, actions),
-                                       int(setup.we_first == (setup.our_side == "blue")))
+            x, contrib, mu = M.draft_x(
+                self.live, blue, red, self._rows(setup, actions), int(setup.we_first == (setup.our_side == "blue"))
+            )
             self._xcache[key] = (np.array([x[f] for f in self.F]), contrib, mu)
         return self._xcache[key]
 
     def _ours(self, p_blue: np.ndarray, setup: Setup) -> np.ndarray:
         return p_blue if setup.our_side == "blue" else 1 - p_blue
 
-    def win_chance(self, setup: Setup, actions) -> dict:
+    def win_chance(self, setup: Setup, actions: Actions) -> dict:
         X, _, _ = self._x(setup, actions)
         p = float(self._ours(M.predict_x(self.live.bundle, X), setup)[0])
         boot = self._ours(M.predict_boot(self.live.bundle, X)[:, 0], setup)
         lo, hi = np.percentile(boot, BAND)
         r = self.live.ratings
         elo_us, elo_them = r.get(self.us, self.live.cfg.elo_init), r.get(self.them, self.live.cfg.elo_init)
-        return {"p": p, "lo": float(lo), "hi": float(hi), "p_elo": float(M.elo_prob(elo_us - elo_them)),
-                "elo_us": elo_us, "elo_them": elo_them, "refits": len(self.live.bundle["bootstrap"])}
+        return {
+            "p": p,
+            "lo": float(lo),
+            "hi": float(hi),
+            "p_elo": float(M.elo_prob(elo_us - elo_them)),
+            "elo_us": elo_us,
+            "elo_them": elo_them,
+            "refits": len(self.live.bundle["bootstrap"]),
+        }
 
-    def trajectory(self, setup: Setup, actions) -> pd.DataFrame:
+    def trajectory(self, setup: Setup, actions: Actions) -> pd.DataFrame:
         """Win chance after 0, 1, ..., len(actions) actions (one batch prediction)."""
         actions = tuple(actions)
         X = np.stack([self._x(setup, actions[:k])[0] for k in range(len(actions) + 1)])
@@ -347,14 +399,18 @@ class Simulator:
         boot = self._ours(M.predict_boot(self.live.bundle, X), setup)
         lo, hi = np.percentile(boot, BAND, axis=0)
         s = slots(setup)
-        labels = ["Start"] + [f"{s[a.slot - 1]['label']} ({'us' if s[a.slot - 1]['who'] == 'us' else 'them'}): "
-                              f"{self.live.names[a.champion_id]}" for a in actions]
+        labels = ["Start"] + [
+            f"{s[a.slot - 1]['label']} ({'us' if s[a.slot - 1]['who'] == 'us' else 'them'}): "
+            f"{self.live.names[a.champion_id]}"
+            for a in actions
+        ]
         short = ["Start"] + [s[a.slot - 1]["label"].replace("Ban ", "B").replace("Pick ", "P") for a in actions]
-        return pd.DataFrame({"step": range(len(actions) + 1), "short": short, "label": labels,
-                             "p": p, "lo": lo, "hi": hi})
+        return pd.DataFrame(
+            {"step": range(len(actions) + 1), "short": short, "label": labels, "p": p, "lo": lo, "hi": hi}
+        )
 
     # --- candidates -----------------------------------------------------------------------
-    def _candidates(self, setup: Setup, actions, who: str, available: np.ndarray) -> pd.DataFrame:
+    def _candidates(self, setup: Setup, actions: Actions, who: str, available: np.ndarray) -> pd.DataFrame:
         """Available champions that fit one of the team's open roles, with that role."""
         open_r = self.open_roles(setup, actions, who)
         if not open_r:
@@ -367,13 +423,22 @@ class Simulator:
         idx = np.flatnonzero(keep)
         return pd.DataFrame({"champion_id": self.champs[idx], "role": [open_r[k] for k in rp[idx].argmax(axis=1)]})
 
-    def _pick_effects(self, setup: Setup, actions, who: str, cand: pd.DataFrame, X_now: np.ndarray):
+    def _pick_effects(
+        self, setup: Setup, actions: Actions, who: str, cand: pd.DataFrame, X_now: np.ndarray
+    ) -> tuple[np.ndarray, pd.DataFrame]:
         """Feature rows after `who` picks each candidate, plus per-candidate evidence."""
         s_side = setup.our_side if who == "us" else ("red" if setup.our_side == "blue" else "blue")
         other = "them" if who == "us" else "us"
         lineup = self.lineup(setup, who)
-        rows = cand.assign(team_id=self.team_id(who), opponent_id=self.team_id(other), side=s_side,
-                           action="pick", player_id=cand["role"].map(lineup), game_id="cand", draft_order=0)
+        rows = cand.assign(
+            team_id=self.team_id(who),
+            opponent_id=self.team_id(other),
+            side=s_side,
+            action="pick",
+            player_id=cand["role"].map(lineup),
+            game_id="cand",
+            draft_order=0,
+        )
         contrib = M.contributions(rows, self.live.hist)
         sign = 1.0 if s_side == "blue" else -1.0
         D = np.zeros((len(cand), len(self.F)))
@@ -385,7 +450,7 @@ class Simulator:
         has = opp.notna().to_numpy()
         m = self.live.hist.matchup
         ours = m.reindex(pd.MultiIndex.from_arrays([cand["role"], cand["champion_id"], opp.where(opp.notna(), "")]))
-        edge = ours["edge"].fillna(0).to_numpy()          # from `who`'s side
+        edge = ours["edge"].fillna(0).to_numpy()  # from `who`'s side
         D[:, self.fi["matchup"]] = np.where(has, sign * edge, 0.0)
         contrib["matchup_vs"] = opp.map(self.live.names).to_numpy()
         contrib["matchup_games"] = np.where(has, ours["games"].fillna(0).to_numpy(), 0)
@@ -397,28 +462,39 @@ class Simulator:
         push = M.feature_push(self.live.bundle, X_new, X_now) * toward_us
         return pd.DataFrame({k: push[:, [self.fi[f] for f in fs]].sum(axis=1) for k, fs in REASONS.items()})
 
-    def _evidence(self, r, who: str) -> dict[str, str]:
+    def _evidence(self, r: Any, who: str) -> dict[str, str]:
         """Plain-English evidence per reason, with sample sizes."""
-        def rec(w, g):
+
+        def rec(w: float, g: float) -> str:
             return f"{int(w)}–{int(g - w)}" + (" · small sample" if g < SMALL_SAMPLE else "")
+
         team_name = "We" if who == "us" else "They"
         pname = self.player_names.get(r.player_id, "the player") if isinstance(r.player_id, str) else "the player"
         out = {
-            "player comfort": (f"{pname}: {int(r.player_games_n)} games on it ({rec(r.player_wins_n, r.player_games_n)})"
-                               if r.player_games_n else f"{pname}: no games on it in the last year"),
-            "team comfort": (f"{team_name} played it as {r.role} {int(r.team_games_n)}× ({rec(r.team_wins_n, r.team_games_n)})"
-                             if r.team_games_n else f"{team_name} haven't played it as {r.role} in the last year"),
+            "player comfort": (
+                f"{pname}: {int(r.player_games_n)} games on it ({rec(r.player_wins_n, r.player_games_n)})"
+                if r.player_games_n
+                else f"{pname}: no games on it in the last year"
+            ),
+            "team comfort": (
+                f"{team_name} played it as {r.role} {int(r.team_games_n)}× ({rec(r.team_wins_n, r.team_games_n)})"
+                if r.team_games_n
+                else f"{team_name} haven't played it as {r.role} in the last year"
+            ),
             "meta strength": f"League: {rec(r.champ_wins, r.champ_picks)} in the last 3 patches "
-                             f"({int(r.window_games)} games)",
+            f"({int(r.window_games)} games)",
         }
         if r.matchup_vs is not None and isinstance(r.matchup_vs, str):
-            out["lane matchup"] = (f"vs {r.matchup_vs} ({r.role}): {rec(r.matchup_wins, r.matchup_games)} in pro games"
-                                   if r.matchup_games else f"vs {r.matchup_vs} ({r.role}): no pro games, counted as 50%")
+            out["lane matchup"] = (
+                f"vs {r.matchup_vs} ({r.role}): {rec(r.matchup_wins, r.matchup_games)} in pro games"
+                if r.matchup_games
+                else f"vs {r.matchup_vs} ({r.role}): no pro games, counted as 50%"
+            )
         else:
             out["lane matchup"] = "no lane opponent picked yet"
         return out
 
-    def best_options(self, setup: Setup, actions, n: int = 5) -> pd.DataFrame | None:
+    def best_options(self, setup: Setup, actions: Actions, n: int = 5) -> pd.DataFrame | None:
         """Top `n` candidates for our current slot, or None if it isn't our turn."""
         actions = tuple(actions)
         if len(actions) >= N_SLOTS:
@@ -439,15 +515,16 @@ class Simulator:
             shift = self._ours(M.predict_x(bundle, Xc), setup) - p_now
             boot = self._ours(M.predict_boot(bundle, Xc), setup) - boot_now[:, None]
             reasons = self._reasons(Xc, X_now, us_blue)
-            out = contrib.assign(shift=shift, lo=np.percentile(boot, BAND[0], axis=0),
-                                 hi=np.percentile(boot, BAND[1], axis=0))
+            out = contrib.assign(
+                shift=shift, lo=np.percentile(boot, BAND[0], axis=0), hi=np.percentile(boot, BAND[1], axis=0)
+            )
             out = pd.concat([out.reset_index(drop=True), reasons], axis=1)
             out = out.sort_values("shift", ascending=False).head(n)
             out["p_them"] = np.nan
             return self._finish(out, "us")
 
         # Ban: value = P(they pick it later) x (how much worse for us than their typical pick).
-        their_slots = [s for s in slots(setup)[len(actions):] if s["who"] == "them" and s["kind"] == "pick"]
+        their_slots = [s for s in slots(setup)[len(actions) :] if s["who"] == "them" and s["kind"] == "pick"]
         if not their_slots:
             return pd.DataFrame()
         open_them = self.open_roles(setup, actions, "them")
@@ -459,16 +536,20 @@ class Simulator:
             return cand
         ci = np.array([self.cidx[c] for c in cand["champion_id"]])
         Xc, contrib = self._pick_effects(setup, actions, "them", cand, X_now)
-        shift = self._ours(M.predict_x(bundle, Xc), setup) - p_now           # <0: good for them
+        shift = self._ours(M.predict_x(bundle, Xc), setup) - p_now  # <0: good for them
         boot = self._ours(M.predict_boot(bundle, Xc), setup) - boot_now[:, None]
         w = p_next[ci] / p_next[ci].sum()
         typical, typical_boot = (w * shift).sum(), (boot * w).sum(axis=1, keepdims=True)
         value = p_any[ci] * (typical - shift)
         value_boot = p_any[ci] * (typical_boot - boot)
-        reasons = -self._reasons(Xc, X_now, us_blue)      # what their pick would gain them
-        out = contrib.assign(shift=value, lo=np.percentile(value_boot, BAND[0], axis=0),
-                             hi=np.percentile(value_boot, BAND[1], axis=0), p_them=p_any[ci],
-                             their_shift=shift)
+        reasons = -self._reasons(Xc, X_now, us_blue)  # what their pick would gain them
+        out = contrib.assign(
+            shift=value,
+            lo=np.percentile(value_boot, BAND[0], axis=0),
+            hi=np.percentile(value_boot, BAND[1], axis=0),
+            p_them=p_any[ci],
+            their_shift=shift,
+        )
         out = pd.concat([out.reset_index(drop=True), reasons], axis=1)
         out = out.sort_values("shift", ascending=False).head(n)
         return self._finish(out, "them")
@@ -477,29 +558,54 @@ class Simulator:
         groups = list(REASONS)
         main = out[groups].idxmax(axis=1).where(out[groups].max(axis=1) > 0, "no single strong reason")
         ev = [self._evidence(r, evidence_for) for r in out.itertuples()]
-        out = out.assign(champion=out["champion_id"].map(self.live.names), reason=main,
-                         evidence=[e.get(m, "") for e, m in zip(ev, main)],
-                         all_evidence=[" · ".join(e.values()) for e in ev])
+        out = out.assign(
+            champion=out["champion_id"].map(self.live.names),
+            reason=main,
+            evidence=[e.get(m, "") for e, m in zip(ev, main, strict=False)],
+            all_evidence=[" · ".join(e.values()) for e in ev],
+        )
         if evidence_for == "them":
-            label = {"player comfort": "denies their comfort pick", "team comfort": "denies their comfort pick",
-                     "lane matchup": "denies a lane matchup they win", "meta strength": "denies a strong meta pick"}
+            label = {
+                "player comfort": "denies their comfort pick",
+                "team comfort": "denies their comfort pick",
+                "lane matchup": "denies a lane matchup they win",
+                "meta strength": "denies a strong meta pick",
+            }
             out["reason"] = out["reason"].map(label).fillna("no single strong reason")
-            out["evidence"] = [f"They pick it {p:.0%} of the time from here · {e}" for p, e in zip(out["p_them"], out["evidence"])]
+            out["evidence"] = [
+                f"They pick it {p:.0%} of the time from here · {e}"
+                for p, e in zip(out["p_them"], out["evidence"], strict=False)
+            ]
         out["shift_pts"], out["lo_pts"], out["hi_pts"] = out["shift"] * 100, out["lo"] * 100, out["hi"] * 100
-        return out[["champion_id", "champion", "role", "shift_pts", "lo_pts", "hi_pts", "reason", "evidence",
-                    "all_evidence", "p_them"]].reset_index(drop=True)
+        return out[
+            [
+                "champion_id",
+                "champion",
+                "role",
+                "shift_pts",
+                "lo_pts",
+                "hi_pts",
+                "reason",
+                "evidence",
+                "all_evidence",
+                "p_them",
+            ]
+        ].reset_index(drop=True)
 
     # --- likely from them -----------------------------------------------------------------
-    def likely_next(self, setup: Setup, actions, n: int = 5) -> dict | None:
+    def likely_next(self, setup: Setup, actions: Actions, n: int = 5) -> dict | None:
         """The opponent's most likely choices for their next slot (now or later)."""
         actions = tuple(actions)
-        nxt = next((s for s in slots(setup)[len(actions):] if s["who"] == "them"), None)
+        nxt = next((s for s in slots(setup)[len(actions) :] if s["who"] == "them"), None)
         if nxt is None:
             return None
         avail = self.available_mask(setup, actions)
-        t, tu = self.tend.team(self.them), self.tend.team(self.us)
         open_r = self.open_roles(setup, actions, "them")
-        return {"slot": nxt, "kind": nxt["kind"], "table": self._likely_table(nxt["kind"], nxt["phase"], open_r, avail, n)}
+        return {
+            "slot": nxt,
+            "kind": nxt["kind"],
+            "table": self._likely_table(nxt["kind"], nxt["phase"], open_r, avail, n),
+        }
 
     def likely_first_phase_picks(self, n: int = 5) -> pd.DataFrame:
         """Their most likely picks in the first pick phase of a fresh draft (all roles open,
@@ -518,8 +624,11 @@ class Simulator:
         for i in top:
             c = self.champs[i]
             meta = champ_meta.loc[c] if c in champ_meta.index else None
-            meta_txt = (f"league: in {meta['presence']:.0%} of games (last 3 patches, {int(meta['window_games'])} games)"
-                        if meta is not None else "league: not played in the last 3 patches")
+            meta_txt = (
+                f"league: in {meta['presence']:.0%} of games (last 3 patches, {int(meta['window_games'])} games)"
+                if meta is not None
+                else "league: not played in the last 3 patches"
+            )
             if kind == "pick":
                 n1, n2 = int(t["pick_n1"][i]), int(t["pick_n2"][i])
                 role = max(open_r, key=lambda r: self.tend.role_probs(self.them)[i, ROLES.index(r)]) if open_r else None
@@ -529,11 +638,21 @@ class Simulator:
                 b = int(t[f"ban_n{phase}"][i])
                 ours = int(tu["pick_n1"][i] + tu["pick_n2"][i])
                 role = None
-                ev = (f"Banned {b}× in phase {phase} of their last {t['games']} games · "
-                      f"we picked it {ours}× in our last {tu['games']} games · {meta_txt}")
+                ev = (
+                    f"Banned {b}× in phase {phase} of their last {t['games']} games · "
+                    f"we picked it {ours}× in our last {tu['games']} games · {meta_txt}"
+                )
                 small = b < SMALL_SAMPLE
-            rows.append({"champion_id": c, "champion": self.live.names[c], "role": role, "prob": float(p[i]),
-                         "evidence": ev, "small_sample": small})
+            rows.append(
+                {
+                    "champion_id": c,
+                    "champion": self.live.names[c],
+                    "role": role,
+                    "prob": float(p[i]),
+                    "evidence": ev,
+                    "small_sample": small,
+                }
+            )
         return pd.DataFrame(rows)
 
 
@@ -551,7 +670,7 @@ def likely_accuracy(live: M.Live, start: str = "2025-07-01") -> pd.DataFrame:
     hits = {k: [] for k in ("pick:tendency", "pick:meta only", "ban:tendency", "ban:meta only")}
     for day, day_acts in test.groupby("date"):
         tend = tendency_tables(actions, day, champs)
-        for (sid, gid), g in day_acts.groupby(["series_id", "game_id"]):
+        for (sid, _gid), g in day_acts.groupby(["series_id", "game_id"]):
             g = g.sort_values("draft_order")
             gnum = g["game_number"].iloc[0]
             locked = a.loc[(a["series_id"] == sid) & (a["game_number"] < gnum) & (a["action"] == "pick"), "ci"]
@@ -560,8 +679,12 @@ def likely_accuracy(live: M.Live, start: str = "2025-07-01") -> pd.DataFrame:
             for r in g.itertuples():
                 if r.action == "pick":
                     phase = 1 if r.draft_order in PHASE1_PICKS else 2
-                    taken = set(g.loc[(g["team_id"] == r.team_id) & (g["action"] == "pick")
-                                      & (g["draft_order"] < r.draft_order), "role"])
+                    taken = set(
+                        g.loc[
+                            (g["team_id"] == r.team_id) & (g["action"] == "pick") & (g["draft_order"] < r.draft_order),
+                            "role",
+                        ]
+                    )
                     open_r = [x for x in ROLES if x not in taken]
                     if r.role in ROLES:
                         for name, lam in (("pick:tendency", TEAM_WEIGHT), ("pick:meta only", 0.0)):
@@ -569,16 +692,26 @@ def likely_accuracy(live: M.Live, start: str = "2025-07-01") -> pd.DataFrame:
                             hits[name].append(_rank(p, r.ci))
                 else:
                     phase = 1 if r.draft_order <= 6 else 2
-                    for name, w in (("ban:tendency", BAN_WEIGHTS), ("ban:meta only", {"team": 0, "meta": 1, "target": 0})):
+                    for name, w in (
+                        ("ban:tendency", BAN_WEIGHTS),
+                        ("ban:meta only", {"team": 0, "meta": 1, "target": 0}),
+                    ):
                         hits[name].append(_rank(ban_probs(tend, r.team_id, r.opponent_id, phase, avail, w), r.ci))
                 avail[r.ci] = 0
     rows = []
     for name, ranks in hits.items():
         ranks = np.array(ranks)
         kind, method = name.split(":")
-        rows.append({"kind": kind, "method": method, "predictions": len(ranks),
-                     "games": int(test["game_id"].nunique()), "top1": float((ranks == 1).mean()),
-                     "top5": float((ranks <= 5).mean())})
+        rows.append(
+            {
+                "kind": kind,
+                "method": method,
+                "predictions": len(ranks),
+                "games": int(test["game_id"].nunique()),
+                "top1": float((ranks == 1).mean()),
+                "top5": float((ranks <= 5).mean()),
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -589,6 +722,7 @@ def _rank(p: np.ndarray, actual: int) -> int:
 def load_likely_accuracy(live: M.Live, rebuild: bool = False) -> pd.DataFrame:
     """likely_accuracy, cached in data_cache/ (aggregate numbers only)."""
     import joblib
+
     key = (str(live.cutoff.date()), TEAM_WEIGHT, OTHER_PHASE_WEIGHT, tuple(BAN_WEIGHTS.values()), TENDENCY_DAYS)
     if not rebuild and LIKELY_EVAL_PATH.exists():
         saved = joblib.load(LIKELY_EVAL_PATH)
@@ -602,6 +736,7 @@ def load_likely_accuracy(live: M.Live, rebuild: bool = False) -> pd.DataFrame:
 
 if __name__ == "__main__":
     import time
+
     t0 = time.time()
     print(load_likely_accuracy(M.live_context(), rebuild=True).to_string(index=False))
     print(f"({time.time() - t0:.0f}s)")

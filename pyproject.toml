@@ -1,0 +1,27 @@
+[project]
+name = "draft-analyzer"
+version = "0.1.0"
+description = "LoL draft scouting and draft management for Cloud9 coaches (Sky's The Limit 2026 hackathon)"
+requires-python = ">=3.13"
+license = { file = "LICENSE" }
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+extend-exclude = ["data_cache", ".idea"]
+
+[tool.ruff.lint]
+# pycodestyle errors/warnings, pyflakes, import order, bugbear, pyupgrade,
+# and type hints on function arguments and return values
+select = ["E", "W", "F", "I", "B", "UP", "ANN001", "ANN201", "ANN202"]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts put src/ on sys.path before importing the package.
+"app/*.py" = ["E402"]
+"notebooks/*.py" = ["E402"]
+"scripts/*.py" = ["E402"]
+# Test functions and fixtures don't need type hints.
+"tests/*.py" = ["ANN001", "ANN201", "ANN202"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["draft_analyzer"]

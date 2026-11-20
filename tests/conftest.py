@@ -60,20 +60,44 @@ def make_synthetic_drafts(n_days: int = 120, seed: int = 0) -> pd.DataFrame:
             p_fp = 1 / (1 + np.exp(-(strength[fp_id] - strength[sp_id])))
             winner = fp_id if rng.random() < p_fp else sp_id
             for slot, team, kind, champ, role in actions:
-                rows.append({
-                    "series_id": f"S{game_no}", "game_id": f"G{game_no}", "game_number": 1,
-                    "event": "Synthetic League", "stage": "Regular", "date": d, "patch": patch,
-                    "team_id": team, "team_name": names[team], "opponent_id": opp[team],
-                    "opponent_name": names[opp[team]], "side": sides[team], "action": kind,
-                    "draft_order": slot, "champion_id": champ, "champion_name": f"Champ{champ[1:]}",
-                    "game_winner_team_id": winner,
-                    "player_id": f"P-{team}-{role}" if role else None,
-                    "player_name": f"{team}-{role}" if role else None, "role_inferred": role,
-                    "role_source": "inferred" if role else None,
-                })
+                rows.append(
+                    {
+                        "series_id": f"S{game_no}",
+                        "game_id": f"G{game_no}",
+                        "game_number": 1,
+                        "event": "Synthetic League",
+                        "stage": "Regular",
+                        "date": d,
+                        "patch": patch,
+                        "team_id": team,
+                        "team_name": names[team],
+                        "opponent_id": opp[team],
+                        "opponent_name": names[opp[team]],
+                        "side": sides[team],
+                        "action": kind,
+                        "draft_order": slot,
+                        "champion_id": champ,
+                        "champion_name": f"Champ{champ[1:]}",
+                        "game_winner_team_id": winner,
+                        "player_id": f"P-{team}-{role}" if role else None,
+                        "player_name": f"{team}-{role}" if role else None,
+                        "role_inferred": role,
+                        "role_source": "inferred" if role else None,
+                    }
+                )
     df = pd.DataFrame(rows, columns=COLUMNS)
-    for col in ("event", "stage", "patch", "side", "action", "team_name", "opponent_name", "champion_name",
-                "role_inferred", "role_source"):
+    for col in (
+        "event",
+        "stage",
+        "patch",
+        "side",
+        "action",
+        "team_name",
+        "opponent_name",
+        "champion_name",
+        "role_inferred",
+        "role_source",
+    ):
         df[col] = df[col].astype("category")
     return df
 

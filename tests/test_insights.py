@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -22,7 +21,7 @@ def test_wilson_interval():
     assert lo < 0.7 < hi and 0 <= lo and hi <= 1
     assert I.wilson(0, 10)[0] == 0 and I.wilson(10, 10)[1] == 1
     assert math.isnan(I.wilson(0, 0)[0])
-    lo_s, hi_s = I.wilson(70, 100)                       # more games, narrower interval
+    lo_s, hi_s = I.wilson(70, 100)  # more games, narrower interval
     assert hi_s - lo_s < hi - lo
     # Known value: 5 of 10 at 90% -> about 0.27-0.73
     assert I.wilson(5, 10) == pytest.approx((0.2693, 0.7307), abs=1e-3)
@@ -42,7 +41,7 @@ def test_entropy():
     assert I.entropy_bits([5]) == 0
     assert I.entropy_bits([1000, 1000, 1000, 1000]) == pytest.approx(2, abs=0.01)
     assert I.entropy_bits([10, 1]) < I.entropy_bits([10, 10])
-    assert I.entropy_bits([1] * 30) == pytest.approx(math.log2(30))     # capped at what was seen
+    assert I.entropy_bits([1] * 30) == pytest.approx(math.log2(30))  # capped at what was seen
 
 
 # --- cards --------------------------------------------------------------------------------
@@ -53,7 +52,7 @@ def test_team_games(scout, synthetic_drafts):
     assert len(tg) == len(mine)
     wins = mine.set_index("game_id")["game_winner_team_id"].eq("T0")
     assert (tg["won"] == wins.reindex(tg.index).astype(int)).all()
-    assert len(scout.team_games("T0", 2)) < len(tg)       # patch window
+    assert len(scout.team_games("T0", 2)) < len(tg)  # patch window
 
 
 def test_cards_are_valid(scout):
@@ -66,7 +65,7 @@ def test_cards_are_valid(scout):
         assert c.groups[0].rate >= c.groups[1].rate
         assert c.takeaway.endswith(".") and c.title
     side = next(c for c in cards if c.kind == "side")
-    assert sum(g.games for g in side.groups) == len(tg)   # blue + red = every game
+    assert sum(g.games for g in side.groups) == len(tg)  # blue + red = every game
     comfort = [c for c in cards if c.kind == "comfort dependency"]
     if comfort:
         assert sum(g.games for g in comfort[0].groups) == len(tg)
@@ -78,8 +77,11 @@ def test_ban_impact_counts(scout, synthetic_drafts):
     for c in scout.ban_impact("T1", tg):
         name = c.champions[0]
         cid = scout.champ_names[scout.champ_names == name].index[0]
-        banned = synthetic_drafts[(synthetic_drafts["action"] == "ban") & (synthetic_drafts["champion_id"] == cid)
-                                  & synthetic_drafts["game_id"].isin(tg.index)]["game_id"].nunique()
+        banned = synthetic_drafts[
+            (synthetic_drafts["action"] == "ban")
+            & (synthetic_drafts["champion_id"] == cid)
+            & synthetic_drafts["game_id"].isin(tg.index)
+        ]["game_id"].nunique()
         assert {g.games for g in c.groups} == {banned, len(tg) - banned}
 
 
@@ -116,7 +118,7 @@ def test_replication_uses_split(scout):
     rep = I.replication(scout, splits=("2025-03-01",))
     assert {"kind", "early_effect", "late_effect", "split"} <= set(rep.columns)
     tells = rep[rep["kind"] == "phase tell"]
-    assert len(tells) and (tells["late_effect"] > 0).all()   # a structural habit replicates
+    assert len(tells) and (tells["late_effect"] > 0).all()  # a structural habit replicates
     summary = I.replication_summary(rep)
     assert (summary["survives"].between(0, 1)).all()
     assert summary.loc[summary["kind"] == "phase tell", "same_direction"].iloc[0] == 1
@@ -125,10 +127,13 @@ def test_replication_uses_split(scout):
 
 
 def test_report_ranking_and_bar(scout):
-    summary = pd.DataFrame({"kind": ["phase tell", "ban impact", "side", "first pick", "comfort dependency",
-                                     "fearless carry-over"],
-                            "early_gap": [0.4, 0.1, 0.1, 0.1, 0.1, 0.1],
-                            "survives": [0.6, 0.0, 0.0, 0.0, 0.5, 0.0]})
+    summary = pd.DataFrame(
+        {
+            "kind": ["phase tell", "ban impact", "side", "first pick", "comfort dependency", "fearless carry-over"],
+            "early_gap": [0.4, 0.1, 0.1, 0.1, 0.1, 0.1],
+            "survives": [0.6, 0.0, 0.0, 0.0, 0.5, 0.0],
+        }
+    )
     r = scout.report("T0", None, replication=summary)
     scores = [c.score for c in r["cards"]]
     assert scores == sorted(scores, reverse=True)
@@ -136,5 +141,5 @@ def test_report_ranking_and_bar(scout):
     for c in r["top"]:
         assert c.reliability >= I.MIN_RELIABILITY and c.confidence >= I.MIN_CONFIDENCE
     assert all(c.score == 0 for c in r["cards"] if c.kind == "ban impact")
-    no_rep = scout.report("T0", None)                     # without replication every type counts fully
+    no_rep = scout.report("T0", None)  # without replication every type counts fully
     assert all(c.reliability == 1 for c in no_rep["cards"])

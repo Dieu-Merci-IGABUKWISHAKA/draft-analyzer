@@ -40,7 +40,7 @@ LABELLED_EVENTS = {
     "LTA South - Split 1 2025",
 }
 
-_CHAMP_ALPHA = 1.0   # pseudo-counts spread evenly over roles for P(role | champion)
+_CHAMP_ALPHA = 1.0  # pseudo-counts spread evenly over roles for P(role | champion)
 _PLAYER_ALPHA = 0.5  # same for P(role | player)
 
 
@@ -66,10 +66,12 @@ def _prob_table(counts: dict[str, Counter], alpha: float) -> dict[str, np.ndarra
 
 def _assign(group: pd.DataFrame, player_p: dict, champ_p: dict) -> list[str]:
     uniform = np.full(len(ROLES), 1 / len(ROLES))
-    scores = np.array([
-        np.log(player_p.get(p, uniform)) + np.log(champ_p.get(c, uniform))
-        for p, c in zip(group["player_id"], group["character_id"])
-    ])
+    scores = np.array(
+        [
+            np.log(player_p.get(p, uniform)) + np.log(champ_p.get(c, uniform))
+            for p, c in zip(group["player_id"], group["character_id"], strict=False)
+        ]
+    )
     # A rare glitched roster lists 6 players with champions: extra players can
     # take a "no role" column at a high cost, so it's used only if needed.
     n_extra = max(0, len(group) - len(ROLES))
@@ -88,16 +90,16 @@ def infer_roles(rosters: pd.DataFrame | None = None, labelled_events: set[str] =
     r.loc[labelled, "role_inferred"] = r.loc[labelled, "slot"].map(dict(enumerate(ROLES)))
 
     champ_counts: dict[str, Counter] = defaultdict(Counter)
-    for c, role in zip(r.loc[labelled, "character_id"], r.loc[labelled, "role_inferred"]):
+    for c, role in zip(r.loc[labelled, "character_id"], r.loc[labelled, "role_inferred"], strict=False):
         champ_counts[c][role] += 1
     champ_p = _prob_table(champ_counts, _CHAMP_ALPHA)
 
     # Initial player prior: hard labels where known, soft champion votes elsewhere.
     player_counts: dict[str, Counter] = defaultdict(Counter)
-    for p, role in zip(r.loc[labelled, "player_id"], r.loc[labelled, "role_inferred"]):
+    for p, role in zip(r.loc[labelled, "player_id"], r.loc[labelled, "role_inferred"], strict=False):
         player_counts[p][role] += 1
-    for p, c in zip(r.loc[~labelled, "player_id"], r.loc[~labelled, "character_id"]):
-        for role, prob in zip(ROLES, champ_p.get(c, np.full(5, 0.2))):
+    for p, c in zip(r.loc[~labelled, "player_id"], r.loc[~labelled, "character_id"], strict=False):
+        for role, prob in zip(ROLES, champ_p.get(c, np.full(5, 0.2)), strict=False):
             player_counts[p][role] += prob
 
     todo = r[~labelled]
@@ -105,10 +107,10 @@ def infer_roles(rosters: pd.DataFrame | None = None, labelled_events: set[str] =
         player_p = _prob_table(player_counts, _PLAYER_ALPHA)
         assigned = {}
         for _, g in todo.groupby(["game_id", "team_id"], sort=False):
-            assigned.update(zip(g.index, _assign(g, player_p, champ_p)))
+            assigned.update(zip(g.index, _assign(g, player_p, champ_p), strict=False))
         r.loc[list(assigned), "role_inferred"] = pd.Series(assigned)
         player_counts = defaultdict(Counter)
-        for p, role in zip(r["player_id"], r["role_inferred"]):
+        for p, role in zip(r["player_id"], r["role_inferred"], strict=False):
             player_counts[p][role] += 1
 
     r["role_source"] = np.where(labelled, "roster_order", "inferred")

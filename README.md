@@ -96,13 +96,18 @@ $env:STL_DATA_DIR = "C:\path\to\stl-hackathon-2026-grid-starter"   # Windows Pow
 ```bash
 cd draft-analyzer
 pip install -r requirements.txt
+python scripts/check_setup.py                     # checks Python, packages, the data folder and caches
 python src/draft_analyzer/drafts.py --rebuild     # streams all 745 series, about 40 s
 python -m streamlit run app/streamlit_app.py      # opens http://localhost:8501
 ```
 
 The build writes `data_cache/drafts.parquet` (gitignored). `python src/draft_analyzer/model.py` runs the walk-forward validation and saves the win-probability model (about 25 s), and `python -m pytest` runs the tests. A text version of the scouting report is `python notebooks/01_cloud9_scouting.py`.
 
-In PyCharm, the committed run configurations **Dashboard (Streamlit)**, **Rebuild drafts table** and **Cloud9 scouting report** do the same.
+`scripts/check_setup.py` prints what is fine and the exact next step for anything missing: the wrong Python version, packages not installed, the data folder not found, or caches not built yet. Missing caches are built on first use.
+
+In PyCharm, the committed run configurations do the same:
+- **Check setup**, **Rebuild drafts table** and **Dashboard (Streamlit)** cover the steps above.
+- **Train draft model**, **Backtest ban plan**, **Tests** and **Cloud9 scouting report** run the rest.
 
 ## Methodology
 

@@ -18,9 +18,13 @@ zstandard = pytest.importorskip("zstandard")
 
 # --- extraction from a feed ---------------------------------------------------------------
 def _event(etype, actor, target, game="g1", seconds=0):
-    return {"type": etype, "actor": actor, "target": target,
-            "seriesStateDelta": {"games": [{"id": game}]},
-            "seriesState": {"games": [{"id": game, "clock": {"currentSeconds": seconds}}]}}
+    return {
+        "type": etype,
+        "actor": actor,
+        "target": target,
+        "seriesStateDelta": {"games": [{"id": game}]},
+        "seriesState": {"games": [{"id": game, "clock": {"currentSeconds": seconds}}]},
+    }
 
 
 def _player(pid, team):
@@ -29,24 +33,57 @@ def _player(pid, team):
 
 def test_scan_series_reads_objectives(tmp_path):
     envs = [
-        {"occurredAt": "t1", "events": [_event("player-killed-player", _player("p1", "A"), _player("p9", "B"), seconds=200)]},
-        {"occurredAt": "t2", "events": [_event("player-multikilled-player", _player("p1", "A"), _player("p9", "B"), seconds=201)]},
-        {"occurredAt": "t3", "events": [_event("player-completed-slayMountainDrake", _player("p2", "B"),
-                                               {"id": "slayMountainDrake"}, seconds=400)]},
-        {"occurredAt": "t4", "events": [_event("player-completed-slayRiftScuttlerTop", _player("p2", "B"),
-                                               {"id": "slayRiftScuttlerTop"}, seconds=210)]},
-        {"occurredAt": "t5", "events": [_event("team-destroyed-tower", {"type": "team", "id": "A"},
-                                               {"id": "red-turret-bot-1"}, seconds=800)]},
-        {"occurredAt": "t6", "events": [_event("player-!completed-slayVoidGrub", _player("p3", "A"),
-                                               {"id": "slayVoidGrub"}, seconds=500)]},
+        {
+            "occurredAt": "t1",
+            "events": [_event("player-killed-player", _player("p1", "A"), _player("p9", "B"), seconds=200)],
+        },
+        {
+            "occurredAt": "t2",
+            "events": [_event("player-multikilled-player", _player("p1", "A"), _player("p9", "B"), seconds=201)],
+        },
+        {
+            "occurredAt": "t3",
+            "events": [
+                _event(
+                    "player-completed-slayMountainDrake", _player("p2", "B"), {"id": "slayMountainDrake"}, seconds=400
+                )
+            ],
+        },
+        {
+            "occurredAt": "t4",
+            "events": [
+                _event(
+                    "player-completed-slayRiftScuttlerTop",
+                    _player("p2", "B"),
+                    {"id": "slayRiftScuttlerTop"},
+                    seconds=210,
+                )
+            ],
+        },
+        {
+            "occurredAt": "t5",
+            "events": [
+                _event("team-destroyed-tower", {"type": "team", "id": "A"}, {"id": "red-turret-bot-1"}, seconds=800)
+            ],
+        },
+        {
+            "occurredAt": "t6",
+            "events": [
+                _event("player-!completed-slayVoidGrub", _player("p3", "A"), {"id": "slayVoidGrub"}, seconds=500)
+            ],
+        },
     ]
     path = tmp_path / "feed.jsonl.zst"
     raw = "\n".join(json.dumps(e) for e in envs).encode()
     path.write_bytes(zstandard.ZstdCompressor().compress(raw))
     state, events = scan_series(path)
     types = [e["type"] for e in events]
-    assert types == ["player-killed-player", "player-completed-slayMountainDrake", "team-destroyed-tower",
-                     "player-completed-slayVoidGrub"]                 # no multikill, no scuttler
+    assert types == [
+        "player-killed-player",
+        "player-completed-slayMountainDrake",
+        "team-destroyed-tower",
+        "player-completed-slayVoidGrub",
+    ]  # no multikill, no scuttler
     assert [e["team_id"] for e in events] == ["A", "B", "A", "A"]
     assert [e["seconds"] for e in events] == [200, 400, 800, 500]
     assert [e["undo"] for e in events] == [False, False, False, True]
@@ -63,30 +100,34 @@ def _ev(rows):
 
 
 def test_first_objectives():
-    ev = _ev([
-        ("g1", "player-completed-slayDragon", "B", "slayDragon", 420, False),
-        ("g1", "player-completed-slayInfernalDrake", "B", "x", 420, False),
-        ("g1", "player-completed-slayDragon", "A", "slayDragon", 900, False),
-        ("g1", "player-killed-player", "Z", None, 100, False),          # not a team in this game
-        ("g1", "player-killed-player", "A", None, 150, False),
-        ("g1", "player-destroyed-tower", "B", "blue-turret-top-1", 700, False),
-        ("g1", "player-destroyed-tower", "B", "red-turret-mid-1", 650, False),   # credited to the wrong side
-        ("g2", "player-completed-slayMountainDrake", "A", "x", 380, False),  # drake-type only (early 2025)
-    ])
+    ev = _ev(
+        [
+            ("g1", "player-completed-slayDragon", "B", "slayDragon", 420, False),
+            ("g1", "player-completed-slayInfernalDrake", "B", "x", 420, False),
+            ("g1", "player-completed-slayDragon", "A", "slayDragon", 900, False),
+            ("g1", "player-killed-player", "Z", None, 100, False),  # not a team in this game
+            ("g1", "player-killed-player", "A", None, 150, False),
+            ("g1", "player-destroyed-tower", "B", "blue-turret-top-1", 700, False),
+            ("g1", "player-destroyed-tower", "B", "red-turret-mid-1", 650, False),  # credited to the wrong side
+            ("g2", "player-completed-slayMountainDrake", "A", "x", 380, False),  # drake-type only (early 2025)
+        ]
+    )
     f = MA.first_objectives(ev, GAMES)
     assert f.loc["g1", "first_dragon_team"] == "B" and f.loc["g1", "first_dragon_s"] == 420
     assert f.loc["g1", "first_blood_team"] == "A" and f.loc["g1", "first_blood_s"] == 150
-    assert f.loc["g1", "first_tower_team"] == "A"            # red tower fell first -> blue (A) took it
+    assert f.loc["g1", "first_tower_team"] == "A"  # red tower fell first -> blue (A) took it
     assert f.loc["g2", "first_dragon_team"] == "A"
     assert np.isnan(f.loc["g2", "first_herald_s"]) and pd.isna(f.loc["g2", "first_herald_team"])
 
 
 def test_undo_removes_the_matching_event():
-    ev = _ev([
-        ("g1", "player-completed-slayVoidGrub", "A", "slayVoidGrub", 500, False),
-        ("g1", "player-completed-slayVoidGrub", "A", "slayVoidGrub", 500, True),
-        ("g1", "player-completed-slayVoidGrub", "B", "slayVoidGrub", 560, False),
-    ])
+    ev = _ev(
+        [
+            ("g1", "player-completed-slayVoidGrub", "A", "slayVoidGrub", 500, False),
+            ("g1", "player-completed-slayVoidGrub", "A", "slayVoidGrub", 500, True),
+            ("g1", "player-completed-slayVoidGrub", "B", "slayVoidGrub", 560, False),
+        ]
+    )
     assert MA.first_objectives(ev, GAMES).loc["g1", "first_grubs_team"] == "B"
 
 
@@ -120,7 +161,7 @@ def test_profile(macro):
     assert p.loc["first_blood", "rate"] == pytest.approx(1 - blue_share)
     assert p.loc["first_blood", "their_median_s"] == 180
     assert p.loc["first_dragon", "games"] == len(tg)
-    assert p.loc["first_herald", "games"] == 0                       # never happened
+    assert p.loc["first_herald", "games"] == 0  # never happened
     lo, hi = I.wilson(int(p.loc["first_dragon", "took"]), len(tg))
     assert (p.loc["first_dragon", "lo"], p.loc["first_dragon", "hi"]) == pytest.approx((lo, hi))
 

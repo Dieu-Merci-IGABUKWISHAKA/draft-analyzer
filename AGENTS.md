@@ -148,7 +148,9 @@ Run it with `python -m streamlit run app/streamlit_app.py`.
 
 - `notebooks/00_check_data.py`: a smoke test that the data is reachable. It streams one Cloud9 feed.
 - `notebooks/01_cloud9_scouting.py`: a text version of the scouting report.
-- `.idea/runConfigurations/`: shared PyCharm configurations: **Dashboard (Streamlit)**, **Rebuild drafts table**, **Cloud9 scouting report**, **Train draft model**, **Tests**.
+- `.idea/runConfigurations/`: shared PyCharm configurations: **Dashboard (Streamlit)**, **Rebuild drafts table**, **Train draft model**, **Backtest ban plan**, **Tests**, **Check setup**, **Cloud9 scouting report**.
+- `scripts/check_setup.py`: fresh-setup check (Python, packages, data folder, caches) with next steps.
+- **Quality:** ruff config in `pyproject.toml` (lint, formatting, type hints on package and app functions). `.github/workflows/ci.yml` runs ruff and pytest on Python 3.13; the test that needs the local data cache skips in CI.
 - `docs/AI_WORKFLOW.md` (how the project was built with Claude Code), `docs/SUBMISSION.md` (Devpost text), `docs/MODEL.md` (win-probability model and validation), `docs/SIMULATOR.md` (draft simulator), `docs/INSIGHTS.md` (insight cards and their replication), `docs/MACRO.md` (early-game patterns and their replication), `docs/VALIDATION.md` (**every validation result in one place**), `docs/images/` (screenshots, still to add).
 - `tests/`: pytest (`python -m pytest`, or the **Tests** run configuration). The tests build a synthetic drafts table, so they run without the licensed data. The real-data leakage test is skipped when the cache is missing. Test data must stay synthetic: never copy GRID rows into a fixture.
 

@@ -55,7 +55,9 @@ def test_features_ignore_same_day_results(synthetic_drafts, feats):
     rows = flipped["game_id"].isin(same_day)
     flipped.loc[rows, "game_winner_team_id"] = np.where(
         flipped.loc[rows, "game_winner_team_id"] == flipped.loc[rows, "team_id"],
-        flipped.loc[rows, "opponent_id"], flipped.loc[rows, "team_id"])
+        flipped.loc[rows, "opponent_id"],
+        flipped.loc[rows, "team_id"],
+    )
     a = feats.set_index(["game_id", "stage"])[M.FEATURES]
     b = M.build_features(flipped, CFG).set_index(["game_id", "stage"])[M.FEATURES]
     pd.testing.assert_frame_equal(a.loc[same_day], b.loc[same_day])
@@ -64,13 +66,13 @@ def test_features_ignore_same_day_results(synthetic_drafts, feats):
 def test_walk_forward_uses_only_earlier_months(feats, monkeypatch):
     """A month's predictions, chosen C and calibration are unchanged when every later
     month is removed: each month only sees earlier games and earlier months' results."""
-    monkeypatch.setattr(M, "MIN_CALIBRATION_GAMES", 50)   # synthetic data is small; make March calibrate
+    monkeypatch.setattr(M, "MIN_CALIBRATION_GAMES", 50)  # synthetic data is small; make March calibrate
     full = M.walk_forward(feats, start="2025-02-01")
     cutoff = pd.Timestamp("2025-04-01")
     cut = M.walk_forward(feats[feats["date"] < cutoff], start="2025-02-01")
     assert [f["month"] for f in cut] == [f["month"] for f in full if f["month"] < cutoff]
     assert any(f["calibrated"] for f in cut)
-    for a, b in zip(full, cut):
+    for a, b in zip(full, cut, strict=False):
         assert a["C"] == b["C"] and a["calibrators"] == b["calibrators"]
         pd.testing.assert_frame_equal(a["preds"], b["preds"])
 
@@ -92,7 +94,7 @@ def test_stage_features_build_up(feats):
     """Stage 0 has no draft signal; picks count up; a matchup needs both lane picks."""
     s0 = feats[feats["stage"] == 0]
     assert (s0[DRAFT_ONLY] == 0).all().all()
-    s7 = feats[feats["stage"] == 7]   # 6 bans + the first pick
+    s7 = feats[feats["stage"] == 7]  # 6 bans + the first pick
     assert (s7["d_n_picks"].abs() == 1).all() and (s7["matchup"] == 0).all()
     assert (np.sign(s7["d_n_picks"]) == np.where(s7["blue_first_pick"] == 1, 1, -1)).all()
     assert (feats.loc[feats["stage"] == 20, "d_n_picks"] == 0).all()
@@ -100,21 +102,21 @@ def test_stage_features_build_up(feats):
 
 @pytest.fixture(scope="module")
 def bundle(feats):
-    return {"model": M.fit("full", feats, 0.1), "calibrator": (1.0, 0.0),
-            "features": M.FEATURES, "config": asdict(CFG)}
+    return {"model": M.fit("full", feats, 0.1), "calibrator": (1.0, 0.0), "features": M.FEATURES, "config": asdict(CFG)}
 
 
 @pytest.mark.parametrize("n_a,n_b", [(0, 0), (1, 0), (1, 2), (3, 2), (5, 5)])
 def test_predict_partial_draft(synthetic_drafts, bundle, n_a, n_b):
     picks_a = ["C0", "C9", "C18", "C27", "C36"][:n_a]
     picks_b = ["C1", "C10", "C19", "C28", "C37"][:n_b]
-    r = M.predict_draft("T0", "T3", "blue", picks_a, picks_b, bans={"a": ["C2"], "b": ["C3"]},
-                        model=bundle, drafts=synthetic_drafts)
+    r = M.predict_draft(
+        "T0", "T3", "blue", picks_a, picks_b, bans={"a": ["C2"], "b": ["C3"]}, model=bundle, drafts=synthetic_drafts
+    )
     assert 0 < r["p_team_a"] < 1
     assert r["p_team_a"] + r["p_team_b"] == pytest.approx(1)
     assert r["features_blue_view"]["d_n_picks"] == n_a - n_b
     assert len(r["actions"]) == n_a + n_b + 2
-    assert r["roles"]["a"] == M.ROLES[:n_a]          # synthetic picks are in role order
+    assert r["roles"]["a"] == M.ROLES[:n_a]  # synthetic picks are in role order
     if min(n_a, n_b) == 0:
         assert r["features_blue_view"]["matchup"] == 0
 
@@ -143,13 +145,16 @@ def test_explicit_roles_override_guess(synthetic_drafts, bundle):
     assert r["roles"] == {"a": ["mid"], "b": ["mid"]}
 
 
-@pytest.mark.parametrize("kwargs,match", [
-    (dict(picks_a=["C0"], picks_b=["C0"]), "more than once"),
-    (dict(picks_a=["C0"], bans=["C0"]), "more than once"),
-    (dict(picks_a=["C0", "C1", "C2", "C3", "C4", "C5"]), "at most 5"),
-    (dict(picks_a=["nope"]), "unknown champion"),
-    (dict(picks_a=["C0", "C9"], roles_a=["top", "top"]), "distinct role"),
-])
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        (dict(picks_a=["C0"], picks_b=["C0"]), "more than once"),
+        (dict(picks_a=["C0"], bans=["C0"]), "more than once"),
+        (dict(picks_a=["C0", "C1", "C2", "C3", "C4", "C5"]), "at most 5"),
+        (dict(picks_a=["nope"]), "unknown champion"),
+        (dict(picks_a=["C0", "C9"], roles_a=["top", "top"]), "distinct role"),
+    ],
+)
 def test_predict_rejects_bad_drafts(synthetic_drafts, bundle, kwargs, match):
     with pytest.raises(ValueError, match=match):
         M.predict_draft("T0", "T3", "blue", model=bundle, drafts=synthetic_drafts, **kwargs)
@@ -159,6 +164,7 @@ def test_predict_rejects_bad_drafts(synthetic_drafts, bundle, kwargs, match):
 @pytest.mark.skipif(not DRAFTS_PATH.exists(), reason="needs the local GRID drafts cache")
 def test_no_leakage_real_data():
     from draft_analyzer.drafts import load_drafts
+
     drafts = load_drafts()
     games, _ = M.prepare(drafts)
     _assert_no_leakage(drafts, games.index[len(games) // 2])

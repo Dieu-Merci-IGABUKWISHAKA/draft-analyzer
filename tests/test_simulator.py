@@ -19,8 +19,13 @@ CFG = M.FeatureConfig(elo_k=32.0)
 @pytest.fixture(scope="module")
 def live(synthetic_drafts):
     feats = M.build_features(synthetic_drafts, CFG)
-    bundle = {"model": M.fit("full", feats, 0.1), "calibrator": (1.0, 0.0), "features": M.FEATURES,
-              "config": asdict(CFG), "bootstrap": M.bootstrap_models(feats, 0.1, n=8)}
+    bundle = {
+        "model": M.fit("full", feats, 0.1),
+        "calibrator": (1.0, 0.0),
+        "features": M.FEATURES,
+        "config": asdict(CFG),
+        "bootstrap": M.bootstrap_models(feats, 0.1, n=8),
+    }
     return M.live_context(bundle, synthetic_drafts)
 
 
@@ -48,13 +53,17 @@ def fill(sim, setup, n):
 # --- board --------------------------------------------------------------------------------
 def test_slot_order_matches_pro_draft():
     s = S.slots(S.Setup(we_first=True))
-    assert [x["who"] for x in s] == (["us", "them"] * 3 + ["us", "them", "them", "us", "us", "them"]
-                                     + ["them", "us", "them", "us"] + ["them", "us", "us", "them"])
+    assert [x["who"] for x in s] == (
+        ["us", "them"] * 3
+        + ["us", "them", "them", "us", "us", "them"]
+        + ["them", "us", "them", "us"]
+        + ["them", "us", "us", "them"]
+    )
     assert [x["label"] for x in s][:7] == ["Ban 1", "Ban 2", "Ban 3", "Ban 4", "Ban 5", "Ban 6", "Pick 1"]
     assert s[12]["label"] == "Ban 7" and s[16]["label"] == "Pick 7" and s[19]["label"] == "Pick 10"
     assert [x["phase"] for x in s if x["kind"] == "pick"] == [1] * 6 + [2] * 4
     flipped = S.slots(S.Setup(we_first=False))
-    assert all(a["who"] != b["who"] for a, b in zip(s, flipped))
+    assert all(a["who"] != b["who"] for a, b in zip(s, flipped, strict=False))
     red = S.slots(S.Setup(our_side="red"))
     assert red[0]["side"] == "red" and red[1]["side"] == "blue"
 
@@ -64,15 +73,15 @@ def test_apply_enforces_rules(sim):
     with pytest.raises(ValueError, match="Fearless"):
         sim.apply(setup, (), "C5")
     acts = sim.apply(setup, (), "C6")
-    assert acts[0].role is None                          # bans have no role
+    assert acts[0].role is None  # bans have no role
     with pytest.raises(ValueError, match="already picked or banned"):
         sim.apply(setup, acts, "C6")
     acts = fill(sim, setup, 6)
-    acts = sim.apply(setup, acts, free(sim, setup, acts, "top"), "top")        # our first pick
-    acts = sim.apply(setup, acts, free(sim, setup, acts, "top"), "top")        # their picks
+    acts = sim.apply(setup, acts, free(sim, setup, acts, "top"), "top")  # our first pick
+    acts = sim.apply(setup, acts, free(sim, setup, acts, "top"), "top")  # their picks
     acts = sim.apply(setup, acts, free(sim, setup, acts, "jungle"), "jungle")
     with pytest.raises(ValueError, match="already filled"):
-        sim.apply(setup, acts, free(sim, setup, acts, "top"), "top")           # our top is taken
+        sim.apply(setup, acts, free(sim, setup, acts, "top"), "top")  # our top is taken
     full = fill(sim, S.Setup(), 20)
     with pytest.raises(ValueError, match="complete"):
         sim.apply(S.Setup(), full, "C39")
@@ -81,7 +90,7 @@ def test_apply_enforces_rules(sim):
 def test_set_role_swaps_teammates(sim):
     setup = S.Setup()
     acts = fill(sim, setup, 6)
-    for role in ("top", "top", "jungle", "mid"):         # slots 7 (us), 8-9 (them), 10 (us)
+    for role in ("top", "top", "jungle", "mid"):  # slots 7 (us), 8-9 (them), 10 (us)
         acts = sim.apply(setup, acts, free(sim, setup, acts, role), role)
     acts = sim.set_role(setup, acts, 10, "top")
     roles = {a.slot: a.role for a in acts}
@@ -98,7 +107,7 @@ def test_win_chance_band_and_trajectory(sim):
     assert len(tr) == len(acts) + 1
     assert tr["p"].iloc[-1] == pytest.approx(wc["p"])
     assert tr["p"].iloc[0] == pytest.approx(sim.win_chance(setup, ())["p"])
-    assert tr["p"].iloc[:7].nunique() == 1               # bans don't enter the win model
+    assert tr["p"].iloc[:7].nunique() == 1  # bans don't enter the win model
 
 
 def test_sides_are_consistent(sim):
@@ -106,7 +115,7 @@ def test_sides_are_consistent(sim):
     a = S.Simulator("T0", "T3", sim.live)
     b = S.Simulator("T3", "T0", sim.live)
     acts_a = fill(a, S.Setup(our_side="blue", we_first=True), 12)
-    acts_b = tuple(acts_a)        # same slots: in b, "us" is T3 and moves second, on red
+    acts_b = tuple(acts_a)  # same slots: in b, "us" is T3 and moves second, on red
     pa = a.win_chance(S.Setup(our_side="blue", we_first=True), acts_a)["p"]
     pb = b.win_chance(S.Setup(our_side="red", we_first=False), acts_b)["p"]
     assert pa == pytest.approx(1 - pb)
@@ -115,7 +124,7 @@ def test_sides_are_consistent(sim):
 # --- best options -------------------------------------------------------------------------
 def test_best_pick_shift_matches_applying_it(sim):
     setup = S.Setup()
-    acts = fill(sim, setup, 6)                           # our first pick is next
+    acts = fill(sim, setup, 6)  # our first pick is next
     best = sim.best_options(setup, acts)
     assert len(best) == 5 and best["shift_pts"].is_monotonic_decreasing
     now = sim.win_chance(setup, acts)["p"]
@@ -132,8 +141,8 @@ def test_best_options_respect_board(sim):
     best = sim.best_options(setup, acts, n=40)
     assert not set(best["champion_id"]) & sim.unavailable(setup, acts)
     acts = sim.apply(setup, acts, best["champion_id"].iloc[0], best["role"].iloc[0])
-    assert sim.best_options(setup, acts) is None         # their turn
-    acts = fill_from(sim, setup, acts, 9)                # through slot 9: our picks 10-11 next
+    assert sim.best_options(setup, acts) is None  # their turn
+    acts = fill_from(sim, setup, acts, 9)  # through slot 9: our picks 10-11 next
     best = sim.best_options(setup, acts, n=40)
     assert set(best["role"]) <= set(sim.open_roles(setup, acts, "us"))
 
@@ -148,7 +157,7 @@ def fill_from(sim, setup, acts, upto):
 
 def test_ban_options(sim):
     setup = S.Setup()
-    best = sim.best_options(setup, ())                   # our first ban
+    best = sim.best_options(setup, ())  # our first ban
     assert len(best) == 5 and best["role"].notna().all()
     assert ((best["p_them"] > 0) & (best["p_them"] <= 1)).all()
     assert best["shift_pts"].is_monotonic_decreasing
@@ -160,7 +169,7 @@ def test_likely_next(sim):
     setup = S.Setup(locked=frozenset({"C1"}))
     ln = sim.likely_next(setup, ())
     assert ln["kind"] == "ban" and ln["slot"]["slot"] == 2
-    acts = fill(sim, setup, 7)                           # their two picks are next
+    acts = fill(sim, setup, 7)  # their two picks are next
     ln = sim.likely_next(setup, acts)
     t = ln["table"]
     assert ln["kind"] == "pick" and len(t) == 5
@@ -192,7 +201,12 @@ def test_step_is_fast(sim):
     setup = S.Setup()
     acts = fill(sim, setup, 15)
     t = time.perf_counter()
-    sim.win_chance(setup, acts), sim.trajectory(setup, acts), sim.best_options(setup, acts), sim.likely_next(setup, acts)
+    (
+        sim.win_chance(setup, acts),
+        sim.trajectory(setup, acts),
+        sim.best_options(setup, acts),
+        sim.likely_next(setup, acts),
+    )
     assert time.perf_counter() - t < 1.0
 
 

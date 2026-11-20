@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import sys
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,14 +32,14 @@ if __package__ in (None, ""):  # allow running this file directly
 from draft_analyzer import model as M  # noqa: E402
 from draft_analyzer.analysis import PHASE1_PICKS, _patch_key, fearless_game_ids  # noqa: E402
 
-Z90 = 1.6449           # two-sided 90%
-MIN_GROUP = 8          # games per compared group for a win-effect card
-MIN_PICKS = 5          # a champion is in a team's pool with this many picks in the window
-TOP_COMFORT = 5        # "top champions" = their 5 most-picked
-MIN_TELL_PICKS = 6     # picks needed for a phase tell
-PHASE1_BASE = 0.6      # 6 of a draft's 10 picks are in phase 1
-TELL_HIGH, TELL_LOW = 0.85, 0.30   # "always early" / "held for counter-pick" phase-1 shares
-MIN_PRED_GAMES = 15    # games needed to compare a team's predictability with the league
+Z90 = 1.6449  # two-sided 90%
+MIN_GROUP = 8  # games per compared group for a win-effect card
+MIN_PICKS = 5  # a champion is in a team's pool with this many picks in the window
+TOP_COMFORT = 5  # "top champions" = their 5 most-picked
+MIN_TELL_PICKS = 6  # picks needed for a phase tell
+PHASE1_BASE = 0.6  # 6 of a draft's 10 picks are in phase 1
+TELL_HIGH, TELL_LOW = 0.85, 0.30  # "always early" / "held for counter-pick" phase-1 shares
+MIN_PRED_GAMES = 15  # games needed to compare a team's predictability with the league
 DEFAULT_PATCHES = 12
 # "How to beat" only lists cards that are at least MIN_CONFIDENCE confident and whose type,
 # among its cards that confident, kept at least MIN_RELIABILITY of its gap in later games
@@ -87,7 +88,7 @@ def one_prop(k: int, n: int, p0: float) -> float:
     return 1 - math.erfc(abs(k / n - p0) / se / math.sqrt(2))
 
 
-def entropy_bits(counts) -> float:
+def entropy_bits(counts: Iterable[float]) -> float:
     """Miller-Madow corrected entropy (bits) of a count vector, capped at log2(distinct
     values seen) so the effective number of choices never exceeds what was observed."""
     c = np.asarray([x for x in counts if x > 0], dtype=float)
@@ -116,23 +117,25 @@ class Group:
 
     def text(self) -> str:
         lo, hi = self.ci
-        return (f"{self.label}: {self.rate:.0%} won ({self.wins}–{self.games - self.wins} in {self.games} games; "
-                f"90% range {lo:.0%}–{hi:.0%})")
+        return (
+            f"{self.label}: {self.rate:.0%} won ({self.wins}–{self.games - self.wins} in {self.games} games; "
+            f"90% range {lo:.0%}–{hi:.0%})"
+        )
 
 
 @dataclass
 class Card:
-    kind: str                       # ban impact / fearless carry-over / comfort dependency / side / first pick
-    title: str                      # the advice, short
-    takeaway: str                   # one sentence
-    groups: list[Group]             # [better-for-them group, worse-for-them group]
-    effect: float                   # win-rate gap between the groups (>= 0)
-    confidence: float               # 1 - p-value
+    kind: str  # ban impact / fearless carry-over / comfort dependency / side / first pick
+    title: str  # the advice, short
+    takeaway: str  # one sentence
+    groups: list[Group]  # [better-for-them group, worse-for-them group]
+    effect: float  # win-rate gap between the groups (>= 0)
+    confidence: float  # 1 - p-value
     evidence: list[str] = field(default_factory=list)
     champions: list[str] = field(default_factory=list)
-    reliability: float = 1.0        # share of this card type's gap that held up in later games
-    typical: float = 1.0            # typical gap for this card type (so different units compare fairly)
-    n: int | None = None            # sample size when there are no groups (phase tells: picks)
+    reliability: float = 1.0  # share of this card type's gap that held up in later games
+    typical: float = 1.0  # typical gap for this card type (so different units compare fairly)
+    n: int | None = None  # sample size when there are no groups (phase tells: picks)
     unit: str = "games"
 
     @property
@@ -145,9 +148,18 @@ class Card:
         return self.n if self.n is not None else sum(g.games for g in self.groups)
 
     def as_dict(self) -> dict:
-        return {"kind": self.kind, "title": self.title, "takeaway": self.takeaway, "effect": self.effect,
-                "confidence": self.confidence, "reliability": self.reliability, "score": self.score,
-                "games": self.games, "unit": self.unit, "evidence": [g.text() for g in self.groups] + self.evidence}
+        return {
+            "kind": self.kind,
+            "title": self.title,
+            "takeaway": self.takeaway,
+            "effect": self.effect,
+            "confidence": self.confidence,
+            "reliability": self.reliability,
+            "score": self.score,
+            "games": self.games,
+            "unit": self.unit,
+            "evidence": [g.text() for g in self.groups] + self.evidence,
+        }
 
 
 @dataclass
@@ -155,7 +167,7 @@ class Tell:
     champion: str
     picks: int
     phase1: int
-    kind: str          # "early" or "held"
+    kind: str  # "early" or "held"
     takeaway: str
     confidence: float
 
@@ -169,16 +181,38 @@ class Tell:
 
     def as_card(self) -> Card:
         lo, hi = wilson(self.phase1, self.picks)
-        title = (f"{self.champion} comes out early" if self.kind == "early"
-                 else f"{self.champion} is held for the counter-pick")
-        return Card("phase tell", title, self.takeaway, [], abs(self.share - PHASE1_BASE), self.confidence,
-                    [f"Picked in phase 1 in {self.phase1} of {self.picks} picks: {self.share:.0%} "
-                     f"(90% range {lo:.0%}–{hi:.0%}); a typical champion: {PHASE1_BASE:.0%}."],
-                    [self.champion], n=self.picks, unit="picks")
+        title = (
+            f"{self.champion} comes out early"
+            if self.kind == "early"
+            else f"{self.champion} is held for the counter-pick"
+        )
+        return Card(
+            "phase tell",
+            title,
+            self.takeaway,
+            [],
+            abs(self.share - PHASE1_BASE),
+            self.confidence,
+            [
+                f"Picked in phase 1 in {self.phase1} of {self.picks} picks: {self.share:.0%} "
+                f"(90% range {lo:.0%}–{hi:.0%}); a typical champion: {PHASE1_BASE:.0%}."
+            ],
+            [self.champion],
+            n=self.picks,
+            unit="picks",
+        )
 
 
-def _compare(kind, high: Group, low: Group, title, takeaway, evidence=(), champions=(),
-             min_group: int = MIN_GROUP) -> Card | None:
+def _compare(
+    kind: str,
+    high: Group,
+    low: Group,
+    title: str,
+    takeaway: str,
+    evidence: Iterable[str] = (),
+    champions: Iterable[str] = (),
+    min_group: int = MIN_GROUP,
+) -> Card | None:
     """A card comparing two groups, oriented so `high` is the better group for the team;
     None unless both groups reach `min_group` games."""
     if min(high.games, low.games) < min_group:
@@ -199,14 +233,19 @@ class Scout:
         self.games, self.actions = M.prepare(drafts)
         a = self.actions.join(self.games[["series_id", "game_number"]], on="game_id")
         self.actions = a
-        self.first_use = (a[a["action"] == "pick"].groupby(["series_id", "champion_id"])["game_number"].min())
+        self.first_use = a[a["action"] == "pick"].groupby(["series_id", "champion_id"])["game_number"].min()
         self.fearless = fearless_game_ids(drafts)
         self.champ_names = drafts.drop_duplicates("champion_id").set_index("champion_id")["champion_name"].astype(str)
         self.team_names = drafts.sort_values("date").groupby("team_id")["team_name"].last().astype(str)
 
     # --- tables ---------------------------------------------------------------------------
-    def team_games(self, team: str, last_patches: int | None = DEFAULT_PATCHES,
-                   before=None, since=None) -> pd.DataFrame:
+    def team_games(
+        self,
+        team: str,
+        last_patches: int | None = DEFAULT_PATCHES,
+        before: str | pd.Timestamp | None = None,
+        since: str | pd.Timestamp | None = None,
+    ) -> pd.DataFrame:
         """The team's games (index game_id): won, side, first_pick, series_id, game_number,
         opponent. Window: its last N patches with games, optionally within [since, before)."""
         g = self.games[(self.games["blue_team"] == team) | (self.games["red_team"] == team)]
@@ -218,13 +257,18 @@ class Scout:
             keep = sorted(g["patch"].dropna().unique(), key=_patch_key)[-last_patches:]
             g = g[g["patch"].isin(keep)]
         blue = g["blue_team"] == team
-        return pd.DataFrame({
-            "won": np.where(blue, g["blue_won"], 1 - g["blue_won"]).astype(int),
-            "side": np.where(blue, "blue", "red"),
-            "first_pick": np.where(blue, g["blue_first_pick"], 1 - g["blue_first_pick"]).astype(bool),
-            "series_id": g["series_id"], "game_number": g["game_number"].astype(int),
-            "opponent": np.where(blue, g["red_team"], g["blue_team"]), "date": g["date"],
-        }, index=g.index)
+        return pd.DataFrame(
+            {
+                "won": np.where(blue, g["blue_won"], 1 - g["blue_won"]).astype(int),
+                "side": np.where(blue, "blue", "red"),
+                "first_pick": np.where(blue, g["blue_first_pick"], 1 - g["blue_first_pick"]).astype(bool),
+                "series_id": g["series_id"],
+                "game_number": g["game_number"].astype(int),
+                "opponent": np.where(blue, g["red_team"], g["blue_team"]),
+                "date": g["date"],
+            },
+            index=g.index,
+        )
 
     def _picks(self, team: str, tg: pd.DataFrame) -> pd.DataFrame:
         a = self.actions
@@ -268,23 +312,31 @@ class Scout:
             extra = [f"{self._cap(who)} picked it in {picks} of {len(tg)} games in the window."]
             if g_open.rate >= g_ban.rate:
                 if view == "self":
-                    title, take = (f"Opponents can ban {name}",
-                                   f"We win {g_open.rate:.0%} when {name} is open and {g_ban.rate:.0%} when it's banned: "
-                                   f"expect it banned and have a fallback ready.")
+                    title, take = (
+                        f"Opponents can ban {name}",
+                        f"We win {g_open.rate:.0%} when {name} is open and {g_ban.rate:.0%} when it's banned: "
+                        f"expect it banned and have a fallback ready.",
+                    )
                 else:
-                    title, take = (f"Ban {name}",
-                                   f"{who} win {g_open.rate:.0%} when {name} is open and {g_ban.rate:.0%} when it's "
-                                   f"banned: banning it takes away a real edge.")
+                    title, take = (
+                        f"Ban {name}",
+                        f"{who} win {g_open.rate:.0%} when {name} is open and {g_ban.rate:.0%} when it's "
+                        f"banned: banning it takes away a real edge.",
+                    )
                 card = _compare("ban impact", g_open, g_ban, title, take, extra, [name], min_group=self.min_group)
             else:
                 if view == "self":
-                    title, take = (f"Bans on {name} don't hurt us",
-                                   f"We win {g_ban.rate:.0%} when {name} is banned vs {g_open.rate:.0%} when open: "
-                                   f"it isn't the crutch opponents may think.")
+                    title, take = (
+                        f"Bans on {name} don't hurt us",
+                        f"We win {g_ban.rate:.0%} when {name} is banned vs {g_open.rate:.0%} when open: "
+                        f"it isn't the crutch opponents may think.",
+                    )
                 else:
-                    title, take = (f"Don't spend a ban on {name}",
-                                   f"{who} win more when {name} is banned ({g_ban.rate:.0%}) than when it's open "
-                                   f"({g_open.rate:.0%}): ban something else.")
+                    title, take = (
+                        f"Don't spend a ban on {name}",
+                        f"{who} win more when {name} is banned ({g_ban.rate:.0%}) than when it's open "
+                        f"({g_open.rate:.0%}): ban something else.",
+                    )
                 card = _compare("ban impact", g_ban, g_open, title, take, extra, [name], min_group=self.min_group)
             if card:
                 cards.append(card)
@@ -306,19 +358,30 @@ class Scout:
             if g_av.rate >= g_gone.rate:
                 if view == "self":
                     title = f"Saving {name} matters in a series"
-                    take = (f"In games 2–5 we win {g_av.rate:.0%} while {name} is still available and "
-                            f"{g_gone.rate:.0%} once it's been used: an opponent can burn it early.")
+                    take = (
+                        f"In games 2–5 we win {g_av.rate:.0%} while {name} is still available and "
+                        f"{g_gone.rate:.0%} once it's been used: an opponent can burn it early."
+                    )
                 else:
                     title = f"Get {name} used up early in the series"
-                    take = (f"In games 2–5 {who} win {g_av.rate:.0%} while {name} is available and "
-                            f"{g_gone.rate:.0%} once it's gone: in Fearless, pick it yourself early so they lose it.")
-                card = _compare("fearless carry-over", g_av, g_gone, title, take, champions=[name], min_group=self.min_group)
+                    take = (
+                        f"In games 2–5 {who} win {g_av.rate:.0%} while {name} is available and "
+                        f"{g_gone.rate:.0%} once it's gone: in Fearless, pick it yourself early so they lose it."
+                    )
+                card = _compare(
+                    "fearless carry-over", g_av, g_gone, title, take, champions=[name], min_group=self.min_group
+                )
             else:
-                card = _compare("fearless carry-over", g_gone, g_av, f"{name} gone doesn't slow "
-                                f"{'us' if view == 'self' else who} down",
-                                f"In games 2–5 {who} win {g_gone.rate:.0%} after {name} is used vs "
-                                f"{g_av.rate:.0%} while it's available: burning it isn't worth a plan.",
-                                champions=[name], min_group=self.min_group)
+                card = _compare(
+                    "fearless carry-over",
+                    g_gone,
+                    g_av,
+                    f"{name} gone doesn't slow {'us' if view == 'self' else who} down",
+                    f"In games 2–5 {who} win {g_gone.rate:.0%} after {name} is used vs "
+                    f"{g_av.rate:.0%} while it's available: burning it isn't worth a plan.",
+                    champions=[name],
+                    min_group=self.min_group,
+                )
             if card:
                 cards.append(card)
         n_gone = gone.sum(axis=1)
@@ -326,14 +389,23 @@ class Scout:
         g0 = Group("0–1 of top 5 used", int(later.loc[n_gone <= 1, "won"].sum()), int((n_gone <= 1).sum()))
         g2 = Group("2+ of top 5 used", int(later.loc[n_gone >= 2, "won"].sum()), int((n_gone >= 2).sum()))
         if g0.rate >= g2.rate:
-            take = (f"In games 2–5 {who} win {g0.rate:.0%} with most of their top 5 ({names}) left and "
-                    f"{g2.rate:.0%} once 2+ are gone: burn their pool across the series."
-                    if view == "opponent" else
-                    f"In games 2–5 we win {g0.rate:.0%} with most of our top 5 left and {g2.rate:.0%} once 2+ "
-                    f"are gone: opponents can grind our pool down across a series.")
-            card = _compare("fearless carry-over", g0, g2,
-                            "Burn their pool across the series" if view == "opponent" else "Our pool runs thin late in series",
-                            take, [f"Top 5: {names}."], [self._name(c) for c in top], min_group=self.min_group)
+            take = (
+                f"In games 2–5 {who} win {g0.rate:.0%} with most of their top 5 ({names}) left and "
+                f"{g2.rate:.0%} once 2+ are gone: burn their pool across the series."
+                if view == "opponent"
+                else f"In games 2–5 we win {g0.rate:.0%} with most of our top 5 left and {g2.rate:.0%} once 2+ "
+                f"are gone: opponents can grind our pool down across a series."
+            )
+            card = _compare(
+                "fearless carry-over",
+                g0,
+                g2,
+                "Burn their pool across the series" if view == "opponent" else "Our pool runs thin late in series",
+                take,
+                [f"Top 5: {names}."],
+                [self._name(c) for c in top],
+                min_group=self.min_group,
+            )
             if card:
                 cards.append(card)
         return cards
@@ -355,24 +427,45 @@ class Scout:
         share_w = in_top[won].mean() if won.any() else float("nan")
         share_l = in_top[~won].mean() if (~won).any() else float("nan")
         names = ", ".join(self._name(c) for c in top)
-        ev = [f"Top 5: {names}.",
-              f"Top-5 champions are {share_w:.0%} of {'our' if view == 'self' else 'their'} picks in wins "
-              f"and {share_l:.0%} in losses ({int(won.sum())} and {int((~won).sum())} picks)."]
+        ev = [
+            f"Top 5: {names}.",
+            f"Top-5 champions are {share_w:.0%} of {'our' if view == 'self' else 'their'} picks in wins "
+            f"and {share_l:.0%} in losses ({int(won.sum())} and {int((~won).sum())} picks).",
+        ]
         if g_many.rate >= g_few.rate:
             if view == "self":
                 title = "We lean on our top 5"
-                take = (f"We win {g_many.rate:.0%} with 2+ of our top 5 and {g_few.rate:.0%} with fewer: "
-                        f"opponents who ban or take them pull us off our best drafts.")
+                take = (
+                    f"We win {g_many.rate:.0%} with 2+ of our top 5 and {g_few.rate:.0%} with fewer: "
+                    f"opponents who ban or take them pull us off our best drafts."
+                )
             else:
-                title = f"Deny their top 5"
-                take = (f"{who} win {g_many.rate:.0%} with 2+ of {names} and {g_few.rate:.0%} with fewer: "
-                        f"spend bans and early picks on that pool.")
-            card = _compare("comfort dependency", g_many, g_few, title, take, ev, [self._name(c) for c in top], min_group=self.min_group)
+                title = "Deny their top 5"
+                take = (
+                    f"{who} win {g_many.rate:.0%} with 2+ of {names} and {g_few.rate:.0%} with fewer: "
+                    f"spend bans and early picks on that pool."
+                )
+            card = _compare(
+                "comfort dependency",
+                g_many,
+                g_few,
+                title,
+                take,
+                ev,
+                [self._name(c) for c in top],
+                min_group=self.min_group,
+            )
         else:
-            card = _compare("comfort dependency", g_few, g_many,
-                            "Comfort picks aren't their engine" if view == "opponent" else "Our comfort picks aren't our engine",
-                            f"{self._cap(who)} win {g_few.rate:.0%} with 0–1 of the top 5 vs {g_many.rate:.0%} with 2+: "
-                            f"denying the pool won't slow {'us' if view == 'self' else 'them'} down.", ev, min_group=self.min_group)
+            card = _compare(
+                "comfort dependency",
+                g_few,
+                g_many,
+                "Comfort picks aren't their engine" if view == "opponent" else "Our comfort picks aren't our engine",
+                f"{self._cap(who)} win {g_few.rate:.0%} with 0–1 of the top 5 vs {g_many.rate:.0%} with 2+: "
+                f"denying the pool won't slow {'us' if view == 'self' else 'them'} down.",
+                ev,
+                min_group=self.min_group,
+            )
         return [card] if card else []
 
     def side_and_first_pick(self, team: str, tg: pd.DataFrame, view: str = "opponent") -> list[Card]:
@@ -383,11 +476,14 @@ class Scout:
         pref = [f"{self._cap(who)} played {blue.mean():.0%} of games on blue."]
         hi, lo = (g_b, g_r) if g_b.rate >= g_r.rate else (g_r, g_b)
         weak = lo.label.split()[-1]
-        title = (f"Put them on {weak}" if view == "opponent" else f"We're weaker on {weak}")
-        take = (f"{who} win {hi.rate:.0%} {hi.label} and {lo.rate:.0%} {lo.label}: with first selection, "
-                f"take the other side so they play {weak}." if view == "opponent" else
-                f"We win {hi.rate:.0%} {hi.label} and {lo.rate:.0%} {lo.label}: opponents with first selection "
-                f"can leave us {weak}.")
+        title = f"Put them on {weak}" if view == "opponent" else f"We're weaker on {weak}"
+        take = (
+            f"{who} win {hi.rate:.0%} {hi.label} and {lo.rate:.0%} {lo.label}: with first selection, "
+            f"take the other side so they play {weak}."
+            if view == "opponent"
+            else f"We win {hi.rate:.0%} {hi.label} and {lo.rate:.0%} {lo.label}: opponents with first selection "
+            f"can leave us {weak}."
+        )
         if card := _compare("side", hi, lo, title, take, pref, min_group=self.min_group):
             cards.append(card)
 
@@ -397,15 +493,27 @@ class Scout:
         hi, lo = (g_fp, g_nf) if g_fp.rate >= g_nf.rate else (g_nf, g_fp)
         if view == "opponent":
             title = "Take first pick from them" if hi is g_fp else "Let them have first pick"
-            take = (f"{who} win {hi.rate:.0%} {hi.label} and {lo.rate:.0%} {lo.label}: "
-                    + ("keep first pick for yourself." if hi is g_fp else "first pick doesn't help them; take the side instead."))
+            take = f"{who} win {hi.rate:.0%} {hi.label} and {lo.rate:.0%} {lo.label}: " + (
+                "keep first pick for yourself."
+                if hi is g_fp
+                else "first pick doesn't help them; take the side instead."
+            )
         else:
             title = "We need first pick" if hi is g_fp else "We're fine without first pick"
-            take = (f"We win {hi.rate:.0%} {hi.label} and {lo.rate:.0%} {lo.label}: "
-                    + ("opponents with first selection can take it from us." if hi is g_fp
-                       else "first selection can go to side instead."))
-        if card := _compare("first pick", hi, lo, title, take,
-                            [f"{self._cap(who)} had first pick in {fp.mean():.0%} of games."], min_group=self.min_group):
+            take = f"We win {hi.rate:.0%} {hi.label} and {lo.rate:.0%} {lo.label}: " + (
+                "opponents with first selection can take it from us."
+                if hi is g_fp
+                else "first selection can go to side instead."
+            )
+        if card := _compare(
+            "first pick",
+            hi,
+            lo,
+            title,
+            take,
+            [f"{self._cap(who)} had first pick in {fp.mean():.0%} of games."],
+            min_group=self.min_group,
+        ):
             cards.append(card)
         return cards
 
@@ -413,20 +521,29 @@ class Scout:
         """Champions they nearly always take in the first pick phase, or hold for phase 2."""
         who = self._who(team, view)
         picks = self._picks(team, tg)
-        stats = picks.assign(p1=picks["draft_order"].isin(PHASE1_PICKS)).groupby("champion_id")["p1"].agg(["size", "sum"])
+        stats = (
+            picks.assign(p1=picks["draft_order"].isin(PHASE1_PICKS)).groupby("champion_id")["p1"].agg(["size", "sum"])
+        )
         tells = []
         for c, r in stats[stats["size"] >= self.min_tell_picks].iterrows():
             n, k, name = int(r["size"]), int(r["sum"]), self._name(c)
             lo, hi = wilson(k, n)
             if k / n >= TELL_HIGH and lo > PHASE1_BASE:
-                take = (f"{who} take {name} early ({k} of {n} picks in phase 1): ban it in phase 1 or take it first; "
-                        f"don't plan to answer it late." if view == "opponent" else
-                        f"We take {name} early ({k} of {n} in phase 1): opponents can plan a phase-1 ban.")
+                take = (
+                    f"{who} take {name} early ({k} of {n} picks in phase 1): ban it in phase 1 or take it first; "
+                    f"don't plan to answer it late."
+                    if view == "opponent"
+                    else f"We take {name} early ({k} of {n} in phase 1): opponents can plan a phase-1 ban."
+                )
                 tells.append(Tell(name, n, k, "early", take, one_prop(k, n, PHASE1_BASE)))
             elif k / n <= TELL_LOW and hi < PHASE1_BASE:
-                take = (f"{who} hold {name} for the counter-pick ({n - k} of {n} picks in phase 2): keep that lane's "
-                        f"pick late or ban it in phase 2." if view == "opponent" else
-                        f"We hold {name} for the counter-pick ({n - k} of {n} in phase 2): opponents can ban it in phase 2.")
+                take = (
+                    f"{who} hold {name} for the counter-pick ({n - k} of {n} picks in phase 2): keep that lane's "
+                    f"pick late or ban it in phase 2."
+                    if view == "opponent"
+                    else f"We hold {name} for the counter-pick ({n - k} of {n} in phase 2): "
+                    "opponents can ban it in phase 2."
+                )
                 tells.append(Tell(name, n, k, "held", take, one_prop(k, n, PHASE1_BASE)))
         return sorted(tells, key=lambda t: -t.score)
 
@@ -444,12 +561,17 @@ class Scout:
         league_teams = self.team_names.index
         for kind in ("pick", "ban"):
             own = self._spread(self.first_choices(team, self.team_games(team, last_patches), kind))
-            league = [self._spread(self.first_choices(t, tg, kind)) for t in league_teams
-                      if t != team and len(tg := self.team_games(t, last_patches)) >= MIN_PRED_GAMES]
+            league = [
+                self._spread(self.first_choices(t, tg, kind))
+                for t in league_teams
+                if t != team and len(tg := self.team_games(t, last_patches)) >= MIN_PRED_GAMES
+            ]
             top3 = [x["top3_share"] for x in league]
             own["league_median_top3"] = float(np.median(top3)) if top3 else float("nan")
             own["league_teams"] = len(top3)
-            own["more_predictable_than"] = float(np.mean([own["top3_share"] > t for t in top3])) if top3 else float("nan")
+            own["more_predictable_than"] = (
+                float(np.mean([own["top3_share"] > t for t in top3])) if top3 else float("nan")
+            )
             own["top"] = [self._name(c) for c in own.pop("top_ids")]
             out[kind] = own
         return out
@@ -459,9 +581,15 @@ class Scout:
         vc = s.value_counts()
         n = int(vc.sum())
         h = entropy_bits(vc.to_numpy())
-        return {"games": n, "distinct": int(len(vc)), "entropy_bits": h, "effective_choices": 2 ** h,
-                "top3_share": float(vc.iloc[:3].sum() / n) if n else float("nan"),
-                "top_ids": list(vc.index[:3]), "top_counts": [int(x) for x in vc.iloc[:3]]}
+        return {
+            "games": n,
+            "distinct": int(len(vc)),
+            "entropy_bits": h,
+            "effective_choices": 2**h,
+            "top3_share": float(vc.iloc[:3].sum() / n) if n else float("nan"),
+            "top_ids": list(vc.index[:3]),
+            "top_counts": [int(x) for x in vc.iloc[:3]],
+        }
 
     def predictability_takeaways(self, team: str, pred: dict, view: str = "self") -> list[str]:
         who = self._who(team, view)
@@ -470,29 +598,44 @@ class Scout:
             p = pred[kind]
             if not p["games"]:
                 continue
-            tops = ", ".join(f"{c} ({k})" for c, k in zip(p["top"], p["top_counts"]))
+            tops = ", ".join(f"{c} ({k})" for c, k in zip(p["top"], p["top_counts"], strict=False))
             rank = p["more_predictable_than"]
             more = rank >= 0.5
             if view == "self":
-                verdict = (f"Opponents can prepare for it: plan bans or first picks around {p['top'][0]}." if more
-                           else "That's hard to prepare for.")
+                verdict = (
+                    f"Opponents can prepare for it: plan bans or first picks around {p['top'][0]}."
+                    if more
+                    else "That's hard to prepare for."
+                )
             else:
-                verdict = (f"Prepare for {p['top'][0]}." if more else "Hard to predict: prepare broadly.")
-            out.append(f"{label.capitalize()}: {who} {'are' if who == 'we' else 'is'} more predictable than "
-                       f"{rank:.0%} of {p['league_teams']} teams. Top 3 = {p['top3_share']:.0%} of {p['games']} games "
-                       f"({tops}); league median {p['league_median_top3']:.0%}. {verdict}")
+                verdict = f"Prepare for {p['top'][0]}." if more else "Hard to predict: prepare broadly."
+            out.append(
+                f"{label.capitalize()}: {who} {'are' if who == 'we' else 'is'} more predictable than "
+                f"{rank:.0%} of {p['league_teams']} teams. Top 3 = {p['top3_share']:.0%} of {p['games']} games "
+                f"({tops}); league median {p['league_median_top3']:.0%}. {verdict}"
+            )
         return out
 
     # --- everything for one team ----------------------------------------------------------
     def cards_from(self, team: str, tg: pd.DataFrame, view: str = "opponent") -> list[Card]:
-        return (self.ban_impact(team, tg, view) + self.fearless_carryover(team, tg, view)
-                + self.comfort_dependency(team, tg, view) + self.side_and_first_pick(team, tg, view))
+        return (
+            self.ban_impact(team, tg, view)
+            + self.fearless_carryover(team, tg, view)
+            + self.comfort_dependency(team, tg, view)
+            + self.side_and_first_pick(team, tg, view)
+        )
 
     def cards(self, team: str, last_patches: int | None = DEFAULT_PATCHES, view: str = "opponent") -> list[Card]:
         return sorted(self.cards_from(team, self.team_games(team, last_patches), view), key=lambda c: -c.score)
 
-    def report(self, team: str, last_patches: int | None = DEFAULT_PATCHES, view: str = "opponent", top: int = 5,
-               replication: pd.DataFrame | None = None) -> dict:
+    def report(
+        self,
+        team: str,
+        last_patches: int | None = DEFAULT_PATCHES,
+        view: str = "opponent",
+        top: int = 5,
+        replication: pd.DataFrame | None = None,
+    ) -> dict:
         """All cards (win-effect cards and phase tells) ranked by
             (gap / typical gap of its type) x confidence x share of that type's gap that held up later,
         with the typical gap and the share from replication_summary (both 1 if None). Dividing
@@ -507,23 +650,30 @@ class Scout:
                 c.typical = float(rep.get(c.kind, {}).get("early_gap", 1.0)) or 1.0
         cards = sorted(cards, key=lambda c: (-c.score, -c.effect))
         pred = self.predictability(team, last_patches)
-        passes = [c for c in cards if c.confidence >= MIN_CONFIDENCE
-                  and (replication is None or holds.get(c.kind, False))]
-        return {"team": self.team_names.get(team, team), "games": len(tg), "cards": cards,
-                "top": passes[:top], "passing": len(passes), "predictability": pred,
-                "predictability_takeaways": self.predictability_takeaways(team, pred, view)}
+        passes = [
+            c for c in cards if c.confidence >= MIN_CONFIDENCE and (replication is None or holds.get(c.kind, False))
+        ]
+        return {
+            "team": self.team_names.get(team, team),
+            "games": len(tg),
+            "cards": cards,
+            "top": passes[:top],
+            "passing": len(passes),
+            "predictability": pred,
+            "predictability_takeaways": self.predictability_takeaways(team, pred, view),
+        }
 
 
 # --- do the gaps hold up in later games? --------------------------------------------------
 REPLICATION_SPLITS = ("2025-07-01", "2026-04-01")
-LATE_MIN_GROUP = 3     # later periods are short, so later groups need only 3 games (picks for tells)
+LATE_MIN_GROUP = 3  # later periods are short, so later groups need only 3 games (picks for tells)
 
 
 def _key(card: Card) -> tuple:
     return card.kind, frozenset(g.label for g in card.groups)
 
 
-def replication(scout: Scout, splits=REPLICATION_SPLITS) -> pd.DataFrame:
+def replication(scout: Scout, splits: Sequence[str] = REPLICATION_SPLITS) -> pd.DataFrame:
     """For every team and split date: build the cards (and phase tells) from all games
     before the split, then the same comparisons from games after it. One row per card
     that can be checked: its earlier gap, its later gap (signed: > 0 = same direction)."""
@@ -541,10 +691,18 @@ def replication(scout: Scout, splits=REPLICATION_SPLITS) -> pd.DataFrame:
                 lc = later.get(_key(c))
                 if lc is not None:
                     same = lc.groups[0].label == c.groups[0].label
-                    rows.append({"split": split, "team": t, "kind": c.kind, "title": c.title,
-                                 "early_effect": c.effect, "early_conf": c.confidence,
-                                 "late_effect": lc.effect if same else -lc.effect, "late_games": lc.games})
-            late_tells = {(x.champion): x for x in late_scout.phase_tells(t, late)}
+                    rows.append(
+                        {
+                            "split": split,
+                            "team": t,
+                            "kind": c.kind,
+                            "title": c.title,
+                            "early_effect": c.effect,
+                            "early_conf": c.confidence,
+                            "late_effect": lc.effect if same else -lc.effect,
+                            "late_games": lc.games,
+                        }
+                    )
             late_picks = late_scout._picks(t, late)
             for tell in scout.phase_tells(t, early):
                 cid = scout.champ_names[scout.champ_names == tell.champion].index[0]
@@ -552,9 +710,18 @@ def replication(scout: Scout, splits=REPLICATION_SPLITS) -> pd.DataFrame:
                 if len(lp) >= LATE_MIN_GROUP:
                     share = lp["draft_order"].isin(PHASE1_PICKS).mean()
                     sign = 1 if tell.kind == "early" else -1
-                    rows.append({"split": split, "team": t, "kind": "phase tell", "title": tell.takeaway,
-                                 "early_effect": abs(tell.share - PHASE1_BASE), "early_conf": tell.confidence,
-                                 "late_effect": sign * (share - PHASE1_BASE), "late_games": len(lp)})
+                    rows.append(
+                        {
+                            "split": split,
+                            "team": t,
+                            "kind": "phase tell",
+                            "title": tell.takeaway,
+                            "early_effect": abs(tell.share - PHASE1_BASE),
+                            "early_conf": tell.confidence,
+                            "late_effect": sign * (share - PHASE1_BASE),
+                            "late_games": len(lp),
+                        }
+                    )
     return pd.DataFrame(rows)
 
 
@@ -573,10 +740,19 @@ def replication_summary(rep: pd.DataFrame, min_confidence: float = MIN_CONFIDENC
         sd = g["late_effect"].std(ddof=1) if len(g) > 1 else float("nan")
         half = Z90 * sd / math.sqrt(len(g)) if len(g) > 1 else float("nan")
         late = float(g["late_effect"].mean())
-        out.append({"kind": kind, "checks": len(g), "same_direction": float((g["late_effect"] > 0).mean()),
-                    "early_gap": float(g["early_effect"].mean()), "late_gap": late,
-                    "late_gap_lo": late - half, "late_gap_hi": late + half,
-                    "all_checks": len(g_all), "all_same_direction": float((g_all["late_effect"] > 0).mean())})
+        out.append(
+            {
+                "kind": kind,
+                "checks": len(g),
+                "same_direction": float((g["late_effect"] > 0).mean()),
+                "early_gap": float(g["early_effect"].mean()),
+                "late_gap": late,
+                "late_gap_lo": late - half,
+                "late_gap_hi": late + half,
+                "all_checks": len(g_all),
+                "all_same_direction": float((g_all["late_effect"] > 0).mean()),
+            }
+        )
     out = pd.DataFrame(out)
     out["survives"] = (out["late_gap"] / out["early_gap"]).clip(0, 1)
     return out.sort_values("survives", ascending=False).reset_index(drop=True)
@@ -585,10 +761,21 @@ def replication_summary(rep: pd.DataFrame, min_confidence: float = MIN_CONFIDENC
 def load_replication(scout: Scout, rebuild: bool = False) -> pd.DataFrame:
     """replication_summary, cached in data_cache/ (aggregate numbers per card type only)."""
     import joblib
+
     from draft_analyzer.config import CACHE_DIR
+
     path = CACHE_DIR / "insights_replication.joblib"
-    key = (str(scout.games["date"].max().date()), scout.min_group, scout.min_tell_picks, REPLICATION_SPLITS,
-           LATE_MIN_GROUP, MIN_PICKS, TOP_COMFORT, MIN_CONFIDENCE, "confident-subset")
+    key = (
+        str(scout.games["date"].max().date()),
+        scout.min_group,
+        scout.min_tell_picks,
+        REPLICATION_SPLITS,
+        LATE_MIN_GROUP,
+        MIN_PICKS,
+        TOP_COMFORT,
+        MIN_CONFIDENCE,
+        "confident-subset",
+    )
     if not rebuild and path.exists():
         saved = joblib.load(path)
         if saved.get("key") == key:
@@ -601,6 +788,7 @@ def load_replication(scout: Scout, rebuild: bool = False) -> pd.DataFrame:
 
 if __name__ == "__main__":
     from draft_analyzer.drafts import load_drafts
+
     pd.set_option("display.width", 200)
     sc = Scout(load_drafts())
     summary = load_replication(sc, rebuild=True)
@@ -611,8 +799,10 @@ if __name__ == "__main__":
         print()
         print(f"== {name}: {r['games']} games, {len(r['cards'])} cards")
         for c in r["top"]:
-            print(f"  [{c.kind}] {c.title}: effect {c.effect:.0%} conf {c.confidence:.2f} held up {c.reliability:.0%} "
-                  f"score {c.score:.3f} n={c.games} {c.unit}")
+            print(
+                f"  [{c.kind}] {c.title}: effect {c.effect:.0%} conf {c.confidence:.2f} held up {c.reliability:.0%} "
+                f"score {c.score:.3f} n={c.games} {c.unit}"
+            )
             print(f"     {c.takeaway}")
         for t in r["predictability_takeaways"]:
             print("  pred:", t)

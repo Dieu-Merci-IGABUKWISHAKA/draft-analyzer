@@ -180,14 +180,19 @@ Elo carries almost everything. Within the draft, **comfort (team and player expe
 ```python
 from draft_analyzer.model import predict_draft
 
-r = predict_draft("Cloud9 Kia", "LYON", side_a="blue",
-                  picks_a=["Ryze"], picks_b=["Cassiopeia", "Ziggs"],
-                  bans={"a": ["Varus"], "b": ["Azir"]})
-r["p_team_a"]            # P(Cloud9 wins), given the draft so far (calibrated)
-r["p_team_a_elo_only"]   # the same from team strength alone
-r["push"]                # each feature's push on Cloud9's log-odds vs an average game
-r["roles"]               # role used for each pick (guessed unless roles_a/roles_b given)
-r["actions"]             # each pick/ban with the sample sizes behind every number
+r = predict_draft(
+    "Cloud9 Kia",
+    "LYON",
+    side_a="blue",
+    picks_a=["Ryze"],
+    picks_b=["Cassiopeia", "Ziggs"],
+    bans={"a": ["Varus"], "b": ["Azir"]},
+)
+r["p_team_a"]  # P(Cloud9 wins), given the draft so far (calibrated)
+r["p_team_a_elo_only"]  # the same from team strength alone
+r["push"]  # each feature's push on Cloud9's log-odds vs an average game
+r["roles"]  # role used for each pick (guessed unless roles_a/roles_b given)
+r["actions"]  # each pick/ban with the sample sizes behind every number
 ```
 
 - **Inputs:**

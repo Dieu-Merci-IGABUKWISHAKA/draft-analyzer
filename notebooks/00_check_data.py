@@ -9,6 +9,7 @@ import json
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import TextIO
 
 import pandas as pd
 
@@ -19,12 +20,12 @@ from draft_analyzer.config import CLOUD9_LOL_TEAM, DATA_DIR, LOL_DIR, META_DIR  
 try:  # Python 3.14+
     from compression import zstd as _zstd
 
-    def open_zst(path: Path):
+    def open_zst(path: Path) -> TextIO:
         return _zstd.open(path, "rt", encoding="utf-8")
 except ImportError:
     import zstandard
 
-    def open_zst(path: Path):
+    def open_zst(path: Path) -> TextIO:
         return io.TextIOWrapper(
             zstandard.ZstdDecompressor().stream_reader(open(path, "rb"), closefd=True),
             encoding="utf-8",
@@ -71,9 +72,7 @@ with open_zst(feed) as f:
             etype = ev["type"]
             type_counts[etype] += 1
             if etype in ("team-picked-character", "team-banned-character") and len(draft_examples) < 8:
-                draft_examples.append(
-                    f"  {etype:24s} {name_of(ev['actor']):12s} -> {name_of(ev['target'])}"
-                )
+                draft_examples.append(f"  {etype:24s} {name_of(ev['actor']):12s} -> {name_of(ev['target'])}")
 
 print(f"Envelopes: {n_envelopes}, events: {sum(type_counts.values())}, distinct types: {len(type_counts)}")
 print("\nEvent types:")
