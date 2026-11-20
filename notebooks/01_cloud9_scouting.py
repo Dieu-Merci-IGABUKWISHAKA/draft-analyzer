@@ -11,13 +11,14 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from draft_analyzer.analysis import (  # noqa: E402
-    bans_against, bans_by, champion_pool, priority_picks, recommend_bans, team_games,
+    DEFAULT_BAN_WEIGHTS, bans_against, bans_by, champion_pool, priority_picks, recommend_bans, team_games,
 )
 from draft_analyzer.config import CLOUD9_LOL_TEAM  # noqa: E402
 from draft_analyzer.drafts import load_drafts  # noqa: E402
 
 HALF_LIFE = 3  # patches: a game 3 patches old counts half
 TOP = 10
+BAN_WEIGHTS = {**DEFAULT_BAN_WEIGHTS, "half_life": HALF_LIFE}  # edit here to try other weightings
 
 pd.set_option("display.width", 200)
 pd.set_option("display.max_colwidth", 120)
@@ -76,6 +77,8 @@ for opp_id, opp in opponents.head(3).iterrows():
         show(f"Priority picks with {pos}",
              pct(pp[pp["draft_position"] == pos], ["very_first_rate", "phase1_rate", "weighted_phase1_rate"]), 5)
     show("Their bans", pct(bans_by(opp_id, half_life=HALF_LIFE, drafts=drafts), ["ban_rate", "weighted_ban_rate"]), 5)
-    rec = recommend_bans(C9, opp_id, n=5, half_life=HALF_LIFE, drafts=drafts)
+    rec = recommend_bans(C9, opp_id, n=5, weights=BAN_WEIGHTS, drafts=drafts)
     show(f"Recommended C9 bans vs {opp['name']}",
          pct(rec, ["smoothed_wr", "weighted_pick_rate"])[["champion", "score", "smoothed_wr", "reason"]], 5)
+
+print(f"\nBan weights: {BAN_WEIGHTS}")
