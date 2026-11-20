@@ -102,16 +102,24 @@ app/streamlit_app.py (dashboard)    notebooks/01_cloud9_scouting.py (text report
   - **Tendencies:** `tendency_tables`, `pick_probs` and `ban_probs` describe the opponent's habits, with fixed weights. `likely_accuracy` checks them walk-forward.
   - **Speed:** the feature cache per draft prefix keeps each step under 1 s.
 
+- **`insights.py`**: insight cards, described in [docs/INSIGHTS.md](docs/INSIGHTS.md). They are built on records and draft habits, not on the win model.
+  - **`Scout(drafts)`:** builds cards for any team, in opponent or self view. The card types are ban impact, Fearless carry-over, comfort dependency, side, first pick, and phase tells.
+  - **Statistics:** Wilson 90% intervals, two-proportion confidence, and a minimum of 8 games per group.
+  - **Predictability:** entropy and top-3 share of first picks and first bans, compared with the league.
+  - **Replication:** `replication` and `replication_summary` re-measure each kind of pattern on later games (splits July 2025 and April 2026).
+  - **Ranking:** `report` ranks by gap / typical gap × confidence × kept, where "kept" is the share of the kind's confident gaps that survived. "How to beat" needs confidence ≥ 80% and kept ≥ 25%.
+
 ### `app/streamlit_app.py`
 
 `st.cache_data` wrappers around the `analysis` functions, then layout only.
 - **Sidebar:** matchup (us and the opponent, default LYON), recency (last N patches, default 6, and the half-life), and a slider for each ban-score weight.
 - **Header:** overall and head-to-head records.
-- **Five tabs:**
+- **Six tabs:**
   - **Opponent scouting:** champion pool chart and table, priority picks, bans by phase.
   - **Against us:** bans each side makes in head-to-head games.
   - **Ban plan:** top 5 ban cards with reasons.
   - **Fearless series:** stats for games 1 to 5, plus the series planner.
+  - **Insights:** "How to beat <opponent>" (top 5 cards that pass the bar), their draft habits, all patterns, "Are these patterns real?" (likely-pick accuracy plus the replication table), and self-scouting for our team.
   - **Draft simulator:** the board, win chance with its band, best options, and likely picks from them. Session state holds the actions; the draft is replayed through `Simulator.apply` on every rerun.
 
 Run it with `python -m streamlit run app/streamlit_app.py`.
@@ -121,7 +129,7 @@ Run it with `python -m streamlit run app/streamlit_app.py`.
 - `notebooks/00_check_data.py`: a smoke test that the data is reachable. It streams one Cloud9 feed.
 - `notebooks/01_cloud9_scouting.py`: a text version of the scouting report.
 - `.idea/runConfigurations/`: shared PyCharm configurations: **Dashboard (Streamlit)**, **Rebuild drafts table**, **Cloud9 scouting report**, **Train draft model**, **Tests**.
-- `docs/AI_WORKFLOW.md` (how the project was built with Claude Code), `docs/SUBMISSION.md` (Devpost text), `docs/MODEL.md` (win-probability model and validation), `docs/SIMULATOR.md` (draft simulator), `docs/images/` (screenshots, still to add).
+- `docs/AI_WORKFLOW.md` (how the project was built with Claude Code), `docs/SUBMISSION.md` (Devpost text), `docs/MODEL.md` (win-probability model and validation), `docs/SIMULATOR.md` (draft simulator), `docs/INSIGHTS.md` (insight cards and their replication), `docs/images/` (screenshots, still to add).
 - `tests/`: pytest (`python -m pytest`, or the **Tests** run configuration). The tests build a synthetic drafts table, so they run without the licensed data. The real-data leakage test is skipped when the cache is missing. Test data must stay synthetic: never copy GRID rows into a fixture.
 
 ## Existing findings
@@ -146,6 +154,11 @@ From data as of patch 16.17. The README holds the current wording, so keep it in
 - **Simulator "likely from them"** (walk-forward, 897 games, each prediction using only earlier games):
   - **Picks:** the actual pick was in the top 5 44% of the time (league meta alone: 37%), and the top guess 13% of the time.
   - **Bans:** top 5 38% of the time (meta alone: 26%).
+- **Which insight patterns hold up in later games** (confident patterns, two split dates pooled):
+  - **Phase tells:** 82% point the same way later, keeping 57% of the gap.
+  - **Comfort dependency:** 82%, keeping 48% (11 checks).
+  - **Ban impact:** 75%, keeping 30% (24 checks). Across all ban gaps, including weak ones, only 52%.
+  - **Side, first pick and Fearless carry-over:** 20–50%, keeping 0%. Treat them as anecdotes.
 - **Winner's curse:** in a test draft vs LYON where Cloud9 always took the top-ranked option, the estimate climbed from 40% to 51%. The best of many noisy estimates is too high, so the simulator says so on screen.
 - **Ban score tuning history.** Version 1 over-ranked Nocturne, a champion LYON loses on (44%). Version 2 put LeBlanc (3–0) and Varus (4–0) on top. The fixes were stronger smoothing and `min_picks`. Now Ryze (6–1 in 7 games) outranks Varus (4–0). These weights were set by judgment on all the data, **not** checked on held-out later games (see rule 5).
 
@@ -155,7 +168,7 @@ From data as of patch 16.17. The README holds the current wording, so keep it in
 |---|---|
 | Repeated pick/ban tendencies | **Built.** Opponent scouting and Against us tabs, plus the Ban plan. |
 | Fearless G3, G4, G5 shift | **Built (Phase 2).** The Fearless tab shows games 1 to 5 separately, each with its record and game count. Games with fewer than 5 games are flagged, and games 4–5 carry a caption that they come only from best-of-5 series. The simulator also takes the game number and the champions locked by earlier games. |
-| "How to win" insights | **Not built.** |
+| "How to win" insights | **Built (Phase 3): Insights tab.** "How to beat <opponent>" lists the top 5 cards, with their evidence, Wilson 90% intervals, confidence and sample sizes. It is backed by a replication check on later games, and only kinds of pattern that held up qualify. Self-scouting runs the same analysis on our team, plus how predictable our first picks and bans are. |
 | Live draft win-rate impact | **Built (Phase 2): Draft simulator tab.** It shows our win chance with a 90% band beside Elo only, a chart of how it moved, the top 5 options with their shift, reason and sample sizes, and the opponent's likely next picks with their checked accuracy. It is framed as "what each choice shifts", never as a forecast. It was checked in the browser for LYON and FlyQuest. |
 | Time-based validation | **Done for the win-probability model only** (walk-forward by month, with leakage tests). The role inference was checked by holding out whole events, not later games. The ban-score weights were not validated on held-out games. |
 | Screenshots and demo video | **Not done.** `docs/images/` is empty, and the video link in the README is a placeholder. |

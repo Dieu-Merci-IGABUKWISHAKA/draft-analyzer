@@ -17,6 +17,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from draft_analyzer import analysis as A  # noqa: E402
+from draft_analyzer import insights as I  # noqa: E402
 from draft_analyzer import model as M  # noqa: E402
 from draft_analyzer import simulator as S  # noqa: E402
 from draft_analyzer.config import CLOUD9_LOL_TEAM  # noqa: E402
@@ -256,8 +257,8 @@ c1.metric("Head-to-head", wl(h2h), pct_of(h2h) if h2h["games"] else "no meetings
 c2.metric(f"{our_name} overall", wl(ours), pct_of(ours), delta_color="off", delta_arrow="off")
 c3.metric(f"{opp_name} overall", wl(theirs), pct_of(theirs), delta_color="off", delta_arrow="off")
 
-tab_scout, tab_vs, tab_plan, tab_fearless, tab_sim = st.tabs(["Opponent scouting", "Against us", "Ban plan",
-                                                              "Fearless series", "Draft simulator"])
+tab_scout, tab_vs, tab_plan, tab_fearless, tab_sim, tab_insights = st.tabs(
+    ["Opponent scouting", "Against us", "Ban plan", "Fearless series", "Draft simulator", "Insights"])
 
 # --- tab: opponent scouting --------------------------------------------------------------
 with tab_scout:
@@ -716,6 +717,137 @@ with tab_sim:
                        f"what's still available. Checked on {int(ours_acc['predictions']):,} past {ln['kind']}s in "
                        f"{int(ours_acc['games'])} games, each using only earlier games: the actual {ln['kind']} was in "
                        f"this top 5 {ours_acc['top5']:.0%} of the time (league meta alone: {meta_acc['top5']:.0%}).")
+
+
+# --- tab: insights --------------------------------------------------------------------------
+@st.cache_resource(show_spinner="Preparing insights...")
+def get_scout():
+    return I.Scout(load_drafts())
+
+
+@st.cache_data(show_spinner="Checking which kinds of pattern hold up in later games (first run: about 30 s)...")
+def insight_replication() -> pd.DataFrame:
+    return I.load_replication(get_scout())
+
+
+@st.cache_data(show_spinner="Writing insight cards...")
+def insight_report(team, patches, view):
+    return get_scout().report(team, patches, view, replication=insight_replication())
+
+
+def insight_card(c) -> None:
+    with st.container(border=True):
+        st.markdown(f"**{html.escape(c.title)}**")
+        st.markdown(c.takeaway)
+        for line in c.as_dict()["evidence"]:
+            st.caption(line)
+        st.caption(f"Confidence {c.confidence:.0%} · this kind of pattern kept {c.reliability:.0%} of its gap in "
+                   f"later games · {c.games} {c.unit}",
+                   help="Confidence = 1 − p-value: how unlikely a gap this big is if there were no real difference. "
+                        "'Kept X% of its gap' comes from checking the same kind of pattern on later games for "
+                        "every team (see 'Are these patterns real?').")
+
+
+def insight_list(rep: dict, empty_msg: str) -> None:
+    if not rep["top"]:
+        st.info(empty_msg)
+    for c in rep["top"]:
+        insight_card(c)
+    if 0 < rep["passing"] < 5:
+        st.caption(f"Only {rep['passing']} pattern{'s' if rep['passing'] != 1 else ''} passed the bar "
+                   f"(confidence ≥ {I.MIN_CONFIDENCE:.0%}, and a kind of pattern that held up in later games).")
+
+
+def all_patterns(rep: dict) -> None:
+    rows = pd.DataFrame([c.as_dict() for c in rep["cards"]])
+    if rows.empty:
+        return
+    with st.expander(f"All {len(rows)} patterns found, including the ones that didn't hold up"):
+        st.caption("Side, first-pick and Fearless carry-over gaps did not hold up in later games, and most "
+                   "low-confidence ban gaps were chance (see 'Are these patterns real?'): read those rows as "
+                   "anecdotes, not plans.")
+        st.dataframe(rows.assign(effect=rows["effect"] * 100, confidence=rows["confidence"] * 100,
+                                 reliability=rows["reliability"] * 100,
+                                 sample=rows["games"].astype(str) + " " + rows["unit"]),
+                     hide_index=True, width="stretch",
+                     column_order=["kind", "title", "effect", "confidence", "reliability", "sample", "takeaway"],
+                     column_config={"kind": "Kind", "title": "Pattern",
+                                    "effect": st.column_config.NumberColumn("Gap (pts)", format="%.0f"),
+                                    "confidence": st.column_config.NumberColumn("Confidence", format="%.0f%%"),
+                                    "reliability": st.column_config.NumberColumn("Held up later", format="%.0f%%"),
+                                    "sample": "Sample", "takeaway": st.column_config.TextColumn("Takeaway", width="large")})
+
+
+with tab_insights:
+    what_this_means(f"plain-language counter-strategies against {opp_name}, built from their own records and draft "
+                    f"habits (not from the win model). Each one shows its evidence, a confidence level and the "
+                    f"sample behind it. Only patterns of a kind that held up in later games make the list.")
+    ins_patches = st.slider("Window: each team's last N patches", 4, info["n_patches"],
+                            min(I.DEFAULT_PATCHES, info["n_patches"]), key="insights_patches",
+                            help="Insights need more games than the other tabs: the default is 12 patches.")
+    opp_rep = insight_report(opp_id, ins_patches, "opponent")
+    st.subheader(f"How to beat {opp_name}")
+    st.caption(f"From {opp_rep['games']} {opp_name} games. Ranked by how large the pattern is for its kind × how "
+               f"confident it is × how much of that kind of pattern held up in later games.")
+    insight_list(opp_rep, f"No pattern passes the bar for {opp_name} in this window. Try a wider window.")
+    st.markdown(f"**{opp_name}'s draft habits**")
+    for line in opp_rep["predictability_takeaways"]:
+        st.markdown(f"- {line}")
+    all_patterns(opp_rep)
+
+    st.subheader("Are these patterns real?")
+    r1, r2 = st.columns(2)
+    with r1:
+        st.markdown("**Their habits predict their next pick**")
+        acc = likely_accuracy()
+        st.dataframe(acc.assign(top1=acc["top1"] * 100, top5=acc["top5"] * 100), hide_index=True, width="stretch",
+                     column_order=["kind", "method", "predictions", "top5", "top1"],
+                     column_config={"kind": "Next", "method": "Guess from",
+                                    "predictions": st.column_config.NumberColumn("Checked", format="%d"),
+                                    "top5": st.column_config.NumberColumn("Actual in top 5", format="%.0f%%"),
+                                    "top1": st.column_config.NumberColumn("Top guess right", format="%.0f%%")})
+        st.caption(f"Every pick and ban of {int(acc['games'].iloc[0])} games from July 2025 on, each guessed from "
+                   f"earlier games only. 'tendency' = the team's own habits by draft phase plus the meta; "
+                   f"'meta only' = what the whole league picks. Habits beat the meta, so tendencies are real.")
+    with r2:
+        st.markdown("**Which kinds of pattern hold up later**")
+        rep_tab = insight_replication()
+        st.dataframe(rep_tab.assign(same_direction=rep_tab["same_direction"] * 100, survives=rep_tab["survives"] * 100,
+                                    early_gap=rep_tab["early_gap"] * 100, late_gap=rep_tab["late_gap"] * 100,
+                                    all_same_direction=rep_tab["all_same_direction"] * 100),
+                     hide_index=True, width="stretch",
+                     column_order=["kind", "checks", "same_direction", "early_gap", "late_gap", "survives",
+                                   "all_same_direction"],
+                     column_config={"kind": "Kind", "checks": st.column_config.NumberColumn(
+                                        "Checks", help=f"Patterns with confidence ≥ {I.MIN_CONFIDENCE:.0%}"),
+                                    "same_direction": st.column_config.NumberColumn("Same direction", format="%.0f%%"),
+                                    "all_same_direction": st.column_config.NumberColumn(
+                                        "All patterns: same dir.", format="%.0f%%",
+                                        help="Including the low-confidence ones"),
+                                    "early_gap": st.column_config.NumberColumn("Gap before", format="%.1f"),
+                                    "late_gap": st.column_config.NumberColumn("Gap after", format="%.1f"),
+                                    "survives": st.column_config.NumberColumn("Kept", format="%.0f%%")})
+        st.caption("For every team, confident patterns found in games before a split date (July 2025 and April "
+                   "2026) were measured again on later games. 50% same direction = coin flip. Draft habits held up "
+                   "best; comfort dependency and confident ban-impact gaps partly; side, first pick and Fearless "
+                   "carry-over gaps did not. Most low-confidence ban gaps were chance.")
+
+    st.subheader(f"Self-scouting: {our_name}")
+    self_rep = insight_report(our_id, ins_patches, "self")
+    st.caption(f"The same analysis on {our_name} ({self_rep['games']} games): what an opponent's analyst could exploit.")
+    insight_list(self_rep, f"No pattern passes the bar for {our_name} in this window.")
+    st.markdown("**How predictable are we?**")
+    for line in self_rep["predictability_takeaways"]:
+        st.markdown(f"- {line}")
+    pred = self_rep["predictability"]
+    p1, p2 = st.columns(2)
+    for col, kind, label in ((p1, "pick", "First pick"), (p2, "ban", "First ban")):
+        x = pred[kind]
+        col.metric(f"{label}: effective choices", f"{x['effective_choices']:.1f}",
+                   f"{x['distinct']} different in {x['games']} games", delta_color="off", delta_arrow="off",
+                   help="2^entropy (Miller–Madow corrected): the number of equally likely options that would be "
+                        "as hard to predict. Higher = harder to prepare for.")
+    all_patterns(self_rep)
 
 
 # --- footer --------------------------------------------------------------------------------
