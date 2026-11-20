@@ -70,7 +70,7 @@ app/streamlit_app.py (dashboard)    notebooks/01_cloud9_scouting.py (text report
   - **Source of truth:** the final `seriesState.games[].draftActions` of each feed, not the event stream. The snapshot already resolves undo events and rollbacks, and it has 5 games' worth of bans that the stream misses.
   - **Joins:** patch, sides, team names and the winner come from `meta/games.csv`, and champion names from `meta/characters.csv`, always on IDs.
   - **Draft slots:** `draft_order` is the standard slot 1–20 (bans 1–6, picks 7–12, bans 13–16, picks 17–20), counted from the team that picks first, not from blue side. Since 2026 ("first selection") that team is often red. `_slots_by_occurrence` handles feeds logged out of order.
-  - **Columns:** `series_id, game_id, game_number, event, stage, date, patch, team_id, team_name, opponent_id, opponent_name, side, action, draft_order, champion_id, champion_name, game_winner_team_id`, plus `player_name, role_inferred, role_source` on picks.
+  - **Columns:** `series_id, game_id, game_number, event, stage, date, patch, team_id, team_name, opponent_id, opponent_name, side, action, draft_order, champion_id, champion_name, game_winner_team_id`, plus `player_id, player_name, role_inferred, role_source` on picks.
   - **Commands:** `load_drafts(rebuild=False)` reads the cache. `python src/draft_analyzer/drafts.py --rebuild` rebuilds it.
 - **`roles.py`**: infers each player's role (top, jungle, mid, bot, support), because the data has no role field. In 6 early-2025 events, roster order is role order; those games are the labels. Every other team-game gets the one-player-per-role assignment that fits both the player's usual role and the champion. Holding out each labelled event in turn, it was right for 100% of player-games.
 - **`analysis.py`**: every function takes a GRID `team_id` and returns a DataFrame that includes sample sizes.
@@ -88,11 +88,12 @@ app/streamlit_app.py (dashboard)    notebooks/01_cloud9_scouting.py (text report
     - `fearless_by_game` gives record, distinct champions and top picks for buckets **G1 / G2 / G3+**.
     - `series_plan` takes the champions already used and returns what the opponent loses, their likely picks now, and new bans.
 
-- **`model.py`**: draft win-probability model, P(first-pick team wins), described in [docs/MODEL.md](docs/MODEL.md).
-  - **Features:** Elo, side, and draft features summed over picks and bans so far, first-pick team minus the other. Every feature uses only games on **earlier dates**.
+- **`model.py`**: draft win-probability model, P(blue side wins), described in [docs/MODEL.md](docs/MODEL.md).
+  - **Features:** Elo, side (the intercept) and `blue_first_pick` as separate features. Draft features are blue minus red, summed over the picks and bans so far: meta win rate, presence, first-phase priority, team and player comfort, lane matchups, and bans. Every feature uses only games on **earlier dates**.
   - **Training:** each game appears at all 21 draft stages, so the model works mid-draft.
-  - **Choice and validation:** K is tuned on 2025 games. The model is chosen on 2026-01-01..03-31 and tested once on games from 2026-04-01.
-  - **Commands:** `python src/draft_analyzer/model.py` validates and saves the model. `load_model()` loads it. `predict_draft(team_a, team_b, side_a, picks_a, picks_b, bans, date, patch)` scores a partial draft and returns sample sizes for every number.
+  - **Validation:** walk-forward by month. Each month is trained on all earlier games. Its C and Platt calibration come from earlier months' out-of-sample predictions only. Elo K is tuned before July 2025. `evaluate()` reports results with series-bootstrap CIs, per league, plus permutation importance.
+  - **Commands:** `python src/draft_analyzer/model.py` validates and saves the model. `load_model()` loads it.
+  - **`predict_draft`:** `predict_draft(team_a, team_b, side_a, picks_a, picks_b, bans, date, patch, roles_a, roles_b)` scores a partial draft. It returns the calibrated win chance, each feature's push, and the sample size behind every number.
 
 ### `app/streamlit_app.py`
 
@@ -125,11 +126,15 @@ From data as of patch 16.17. The README holds the current wording, so keep it in
 - **Cloud9 Kia vs LYON.** Cloud9 is 4–9 against LYON in the last 6 patches (13 games). In the same window LYON is 27–12 and Cloud9 23–22. Over all data Cloud9 is 90–52.
 - **Respect ban vs Cloud9 has shifted.** A respect ban removes a champion because the other team is strong on it. Ziggs is the most-banned champion against Cloud9 overall (41 bans in 142 games). With recency weighting (half-life 3 patches), Cassiopeia leads at 39% and Ziggs drops to 17%.
 - **LYON by game number in Fearless series, last 6 patches.** LYON is 11–2 in game 2, against 8–5 in both game 1 and game 3+ (13 games each). Over all data the gap is small (53% / 60% / 59%), so treat this as a recent trend on a small sample.
-- **Win-probability model** (test: 275 games from 2026-04-04 to 2026-10-13, trained on earlier games):
-  - Elo + side + draft gets 65.1% accuracy and log loss 0.631, against 64.4% and 0.642 for Elo alone.
-  - The draft's gain is small and not statistically clear: log loss +0.011, 95% CI −0.002..+0.025.
-  - A full draft moves the estimate by a median of 2.3 points.
-  - In 2026 blue side won 56.7% of test games, and first-pick teams only 47.6%, because many first-pick teams played on red.
+- **Win-probability model** (walk-forward test: 897 games in 13 monthly folds, July 2025 to October 2026; each month trained on earlier games only):
+  - **Elo alone:** 64.1% accuracy, log loss 0.639.
+  - **Full model with the draft:** 65.2% accuracy, log loss 0.645.
+  - **The draft gain is not statistically real.** Full vs Elo + side: log loss −0.004 (95% CI −0.010..+0.003), accuracy −0.1 pts (CI −2.0..+1.7). No league shows a reliable gain either.
+  - **Elo dominates.** Permutation importance is 0.111 for Elo vs 0.003 for all draft features together. In the draft, only team and player comfort carry weight, and they correlate with Elo (r 0.27–0.36).
+  - **What a draft shifts:** a full draft moves the estimate by a median of 3.0 points (90% under 7.6).
+  - **Sides:** blue won 52.3% of test games. First pick is no advantage: blue won 51.8% with first pick and 53.5% without it (243 games).
+  - **Calibration:** Platt calibration did not help (log loss 0.641 → 0.645). The final calibration is nearly the identity.
+  - **Phase 1 is superseded:** its single-split result (275 games, draft gain +0.011 log loss) did not hold up.
 - **Ban score tuning history.** Version 1 over-ranked Nocturne, a champion LYON loses on (44%). Version 2 put LeBlanc (3–0) and Varus (4–0) on top. The fixes were stronger smoothing and `min_picks`. Now Ryze (6–1 in 7 games) outranks Varus (4–0). These weights were set by judgment on all the data, **not** checked on held-out later games (see rule 5).
 
 ## Status vs the judges' questions
@@ -140,6 +145,6 @@ From data as of patch 16.17. The README holds the current wording, so keep it in
 | Fearless G3, G4, G5 shift | **Partly built.** The code merges games 3–5 into one "G3+" bucket. Judges ask about G3, G4 and G5 separately: show them apart, even if the sample is small (flag it), and compare to G1 and G2. |
 | Split Fearless "G3+" into G3, G4 and G5 | **Planned for Phase 2.** Each game number gets its own row with its sample size (games and W-L), and small samples are flagged. |
 | "How to win" insights | **Not built.** |
-| Live draft win-rate impact | **Model built, not in the app yet.** `model.predict_draft` works on partial drafts and was validated on later games (docs/MODEL.md). Still to do: a dashboard panel that updates as picks are entered and shows the held-out accuracy and the sample sizes. Be honest on screen that the draft moves the estimate only a few points. |
-| Time-based validation | **Done for the win-probability model only.** The role inference was checked by holding out whole events, not later games. The ban-score weights were not validated on held-out games. |
+| Live draft win-rate impact | **Model built and validated (Phase 1b), not in the app yet.** `model.predict_draft` works on partial drafts. Walk-forward testing shows the draft adds no reliable accuracy beyond team strength (docs/MODEL.md). The simulator must present each pick as "how much this choice shifts the odds, according to past games", with the sample size behind it, not as a confident forecast. It should show Elo-only vs with-draft side by side, plus the held-out accuracy. |
+| Time-based validation | **Done for the win-probability model only** (walk-forward by month, with leakage tests). The role inference was checked by holding out whole events, not later games. The ban-score weights were not validated on held-out games. |
 | Screenshots and demo video | **Not done.** `docs/images/` is empty, and the video link in the README is a placeholder. |

@@ -38,7 +38,7 @@ COLUMNS = [
     "draft_order", "champion_id", "champion_name", "game_winner_team_id",
 ]
 # Picks only (see roles.py); empty for bans.
-ROLE_COLUMNS = ["player_name", "role_inferred", "role_source"]
+ROLE_COLUMNS = ["player_id", "player_name", "role_inferred", "role_source"]
 COLUMNS += ROLE_COLUMNS
 
 # Standard pro tournament draft: slot -> (drafter, action), where "F" is the
@@ -208,7 +208,7 @@ def build_drafts(finished_only: bool = True) -> pd.DataFrame:
     # Picks get the player who played the champion and their inferred role
     # (see roles.py: there is no role field in the data). Bans stay empty.
     roles = infer_roles().rename(columns={"character_id": "champion_id"})
-    df = df.merge(roles.drop(columns="player_id"), on=["game_id", "team_id", "champion_id"], how="left")
+    df = df.merge(roles, on=["game_id", "team_id", "champion_id"], how="left")
     df.loc[df["action"] == "ban", ROLE_COLUMNS] = None
     unmatched = df[(df["action"] == "pick") & df["role_inferred"].isna()]
     if len(unmatched):

@@ -12,7 +12,7 @@ A draft-scouting dashboard built on GRID's official pro match data. Pick Cloud9 
 - **Against us**: what the opponent bans against Cloud9, and what Cloud9 bans against them, in head-to-head games only.
 - **Ban plan**: the top 5 recommended bans as cards. Each card gives the reason (e.g. "Picked 7 of 39 games · 3 in last 3 patches", "Win rate 86% (6–1)", "Banned vs them in 4 games"), flags small samples, and shows the score. All score weights are sidebar sliders.
 - **Fearless series**: the opponent's record, number of different champions and most-picked champions by game number (G1, G2, G3+), in Fearless series only. The **series planner** takes the champions each team has already used and shows what the opponent loses, their likely picks now, and a new ban plan.
-- **Win-probability model** (`src/draft_analyzer/model.py`, not in the dashboard yet): estimates the win chance from team strength (Elo), side and the draft, and updates pick by pick on a partial draft. It was tested on 275 later games it never saw: 65.1% accuracy, against 64.4% for team strength alone. The draft's extra gain is small and not statistically clear. Full method and numbers: [docs/MODEL.md](docs/MODEL.md).
+- **Win-probability model** (`src/draft_analyzer/model.py`, not in the dashboard yet): estimates the win chance from team strength (Elo), side and the draft, and updates pick by pick on a partial draft. It uses Elo, side, champion meta, team and player comfort, and lane matchups. It was tested walk-forward, month by month, on 897 games it never saw: 65.2% accuracy, against 64.1% for team strength alone. That difference is not statistically real: once team strength is known, the draft adds no reliable accuracy. So it is meant to show how much each choice shifts the odds, not to forecast the winner. Full method and numbers: [docs/MODEL.md](docs/MODEL.md).
 - Recency controls everywhere: last N patches (default 6) and a half-life for weighting recent games.
 
 ## What the tool shows
@@ -68,7 +68,7 @@ python src/draft_analyzer/drafts.py --rebuild     # streams all 745 series, abou
 python -m streamlit run app/streamlit_app.py      # opens http://localhost:8501
 ```
 
-The build writes `data_cache/drafts.parquet` (gitignored). `python src/draft_analyzer/model.py` validates and saves the win-probability model (about 25 s), and `python -m pytest` runs the tests. A text version of the scouting report is `python notebooks/01_cloud9_scouting.py`.
+The build writes `data_cache/drafts.parquet` (gitignored). `python src/draft_analyzer/model.py` runs the walk-forward validation and saves the win-probability model (about 25 s), and `python -m pytest` runs the tests. A text version of the scouting report is `python notebooks/01_cloud9_scouting.py`.
 
 In PyCharm, the committed run configurations **Dashboard (Streamlit)**, **Rebuild drafts table** and **Cloud9 scouting report** do the same.
 

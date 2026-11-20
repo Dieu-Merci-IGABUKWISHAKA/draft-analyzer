@@ -18,7 +18,7 @@ from draft_analyzer.drafts import COLUMNS, DRAFT_TEMPLATE  # noqa: E402
 ROLES = ["top", "jungle", "mid", "bot", "support"]
 
 
-def make_synthetic_drafts(n_days: int = 60, seed: int = 0) -> pd.DataFrame:
+def make_synthetic_drafts(n_days: int = 120, seed: int = 0) -> pd.DataFrame:
     """Six teams, 40 champions (8 per role), two games a day, a new patch every 10 days.
     Stronger teams (lower index) win more; a few champions are slightly overpowered."""
     rng = np.random.default_rng(seed)
@@ -67,6 +67,7 @@ def make_synthetic_drafts(n_days: int = 60, seed: int = 0) -> pd.DataFrame:
                     "opponent_name": names[opp[team]], "side": sides[team], "action": kind,
                     "draft_order": slot, "champion_id": champ, "champion_name": f"Champ{champ[1:]}",
                     "game_winner_team_id": winner,
+                    "player_id": f"P-{team}-{role}" if role else None,
                     "player_name": f"{team}-{role}" if role else None, "role_inferred": role,
                     "role_source": "inferred" if role else None,
                 })
