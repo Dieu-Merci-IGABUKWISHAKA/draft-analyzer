@@ -102,6 +102,17 @@ def team_options(team_id: str, drafts: pd.DataFrame | None = None, league_prefix
     return out.sort_values(["in_league", "games_vs", "name"], ascending=[False, False, True])
 
 
+def window_patches(team_ids: list[str], last_patches: int | None = None,
+                   drafts: pd.DataFrame | None = None) -> tuple[str, str] | None:
+    """Earliest and latest patch covered by these teams' games in the window."""
+    df = _drafts(drafts)
+    patches = {str(p) for t in team_ids for p in team_games(t, df, last_patches)["patch"]}
+    if not patches:
+        return None
+    ordered = sorted(patches, key=_patch_key)
+    return ordered[0], ordered[-1]
+
+
 def data_summary(drafts: pd.DataFrame | None = None) -> dict:
     """Patch and date range and size of the drafts table."""
     df = _drafts(drafts)
@@ -239,8 +250,9 @@ def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict
     half_life, prior_games = w["half_life"], w["prior_games"]
     df = _drafts(drafts)
     games = team_games(opponent_id, df, last_patches, half_life)
-    cols = ["champion", "score", "picks", "record", "smoothed_wr", "wr_edge", "weighted_pick_rate",
-            "banned_against", "our_picks", "n_opp_games", "reason"]
+    cols = ["champion", "score", "picks", "wins", "record", "recent_picks", "smoothed_wr", "wr_edge",
+            "weighted_pick_rate", "banned_against", "our_picks", "n_our_games", "n_opp_games",
+            "reason_lines", "reason"]
     if games.empty:
         return pd.DataFrame(columns=cols)
     W = games["weight"].sum()
@@ -280,20 +292,22 @@ def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict
 
     n_games, n_recent = len(games), len(recent_ids)
 
-    def reason(r) -> str:
-        parts = [f"Picked in {int(r.picks)}/{n_games} games ({int(r.recent_picks)}/{n_recent} in last {RECENT_PATCHES} patches)"]
+    def reason_lines(r) -> list[str]:
+        """Short plain-English lines; the last (optional) one is about our own use of it."""
+        lines = [f"Picked {int(r.picks)} of {n_games} games · {int(r.recent_picks)} in last {RECENT_PATCHES} patches"]
         if r.picks:
-            parts.append(f"{r.wins / r.picks:.0%} WR ({int(r.wins)}-{int(r.picks - r.wins)})")
-            if r.picks < SMALL_SAMPLE:
-                parts[-1] += ", small sample"
+            wr = f"Win rate {r.wins / r.picks:.0%} ({int(r.wins)}–{int(r.picks - r.wins)})"
+            lines.append(wr + (" · small sample" if r.picks < SMALL_SAMPLE else ""))
         if r.banned_against:
-            parts.append(f"banned against them in {int(r.banned_against)}/{n_games}")
+            lines.append(f"Banned vs them in {int(r.banned_against)} games")
         if r.our_picks:
-            parts.append(f"we also pick it ({int(r.our_picks)}/{len(ours)} of our games)")
-        return "; ".join(parts)
+            lines.append(f"We pick it too ({int(r.our_picks)} of our {len(ours)} games)")
+        return lines
 
     out = out.sort_values("score", ascending=False).head(n).reset_index(drop=True)
-    out["reason"] = out.apply(reason, axis=1)
+    out["reason_lines"] = out.apply(reason_lines, axis=1)
+    out["reason"] = out["reason_lines"].str.join(" · ")
     out["record"] = _record(out["wins"], out["picks"])
     out["n_opp_games"] = n_games
+    out["n_our_games"] = len(ours)
     return out[cols]

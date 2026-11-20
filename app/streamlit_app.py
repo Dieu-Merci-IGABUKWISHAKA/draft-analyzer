@@ -3,8 +3,10 @@
 Run:  python -m streamlit run app/streamlit_app.py
 
 All numbers come from draft_analyzer.analysis; this file only lays them out.
+Text only: no game artwork or champion images.
 """
 
+import html
 import sys
 from pathlib import Path
 
@@ -17,11 +19,24 @@ from draft_analyzer import analysis as A  # noqa: E402
 from draft_analyzer.config import CLOUD9_LOL_TEAM  # noqa: E402
 from draft_analyzer.drafts import load_drafts  # noqa: E402
 
-st.set_page_config(page_title="Draft Scouting", layout="wide")
+st.set_page_config(page_title="Draft Scouting", page_icon="🎯", layout="wide")
 
+DEFAULT_OPPONENT = "LYON"
+DEFAULT_LAST_PATCHES = 6
+MIN_POOL_GAMES = 3  # champion pool hides fewer games than this unless "Show small samples"
 ROLE_ORDER = ["top", "jungle", "mid", "bot", "support"]
 ROLE_COLORS = {"top": "#4C78A8", "jungle": "#54A24B", "mid": "#E45756", "bot": "#F58518", "support": "#B279A2"}
 PHASE_COLORS = {"Phase 1 (bans 1-6)": "#4C78A8", "Phase 2 (bans 7-10)": "#F58518"}
+GREY = "#9aa0a6"
+
+st.markdown("""
+<style>
+.ban-name {font-size: 1.2rem; font-weight: 600; white-space: nowrap; overflow: hidden;
+           text-overflow: ellipsis; margin-bottom: 0.25rem;}
+.ban-line {margin: 0.1rem 0; font-size: 0.85rem; line-height: 1.35;}
+.ban-small {color: #d9822b;}
+</style>
+""", unsafe_allow_html=True)
 
 
 # --- cached data access (primitive args only; drafts come from the cached loader) ---
@@ -52,6 +67,11 @@ def record(team_id, last_patches, vs=None):
 
 
 @st.cache_data
+def window_patches(team_ids, last_patches):
+    return A.window_patches(list(team_ids), last_patches, drafts=get_drafts())
+
+
+@st.cache_data
 def champion_pool(team_id, last_patches, half_life):
     return A.champion_pool(team_id, last_patches, half_life, drafts=get_drafts())
 
@@ -72,13 +92,22 @@ def recommend_bans(our_id, opp_id, n, weights, last_patches):
                             last_patches=last_patches)
 
 
-# --- helpers for display only ------------------------------------------------------
+# --- display helpers -----------------------------------------------------------------
 def wl(rec: dict) -> str:
-    return f"{rec['wins']}-{rec['losses']}" if rec["games"] else "no games"
+    return f"{rec['wins']}–{rec['losses']}" if rec["games"] else "no games"
 
 
 def pct_of(rec: dict) -> str:
     return f"{rec['wins'] / rec['games']:.0%} of {rec['games']} games" if rec["games"] else "-"
+
+
+def what_this_means(text: str) -> None:
+    st.markdown(f"**What this means:** {text}")
+
+
+def text_bar(rate: float, width: int = 10) -> str:
+    filled = round(rate * width)
+    return "▰" * filled + "▱" * (width - filled) + f"  {rate:.0%}"
 
 
 def bans_chart(bans: pd.DataFrame, top: int = 12):
@@ -99,9 +128,9 @@ BAN_COLUMNS = {
     "phase1_bans": st.column_config.NumberColumn("Phase 1"),
     "phase2_bans": st.column_config.NumberColumn("Phase 2"),
     "n_games": st.column_config.NumberColumn("Games", help="Games in the window (the sample size)"),
-    "ban_rate": st.column_config.ProgressColumn("Ban rate", format="percent", min_value=0, max_value=1),
-    "weighted_ban_rate": st.column_config.ProgressColumn("Recent ban rate", format="percent", min_value=0,
-                                                         max_value=1, help="Weighted toward recent patches"),
+    "ban_rate": st.column_config.ProgressColumn("Ban rate", format="%.0f%%", min_value=0, max_value=100),
+    "weighted_ban_rate": st.column_config.ProgressColumn("Recent ban rate", format="%.0f%%", min_value=0,
+                                                         max_value=100, help="Weighted toward recent patches"),
     "small_sample": st.column_config.CheckboxColumn("Small sample", help=f"Fewer than {A.SMALL_SAMPLE} games"),
 }
 
@@ -112,7 +141,22 @@ def show_bans(bans: pd.DataFrame, empty_msg: str) -> None:
         return
     st.plotly_chart(bans_chart(bans), width="stretch")
     with st.expander("Table"):
-        st.dataframe(bans, column_config=BAN_COLUMNS, hide_index=True, width="stretch")
+        st.dataframe(bans.assign(ban_rate=bans["ban_rate"] * 100, weighted_ban_rate=bans["weighted_ban_rate"] * 100),
+                     column_config=BAN_COLUMNS, hide_index=True, width="stretch")
+
+
+def ban_card(rank: int, r) -> None:
+    with st.container(border=True):
+        name = html.escape(str(r.champion))
+        st.markdown(f'<div class="ban-name" title="{name}">{rank}. {name}</div>', unsafe_allow_html=True)
+        lines = list(r.reason_lines)
+        main, ours = (lines[:-1], lines[-1]) if lines and lines[-1].startswith("We pick it") else (lines, None)
+        for line in main:
+            text = html.escape(line).replace(" · small sample", ' · <span class="ban-small">small sample</span>')
+            st.markdown(f'<p class="ban-line">{text}</p>', unsafe_allow_html=True)
+        caption = f"Ban score {r.score:.2f} · smoothed win rate {r.smoothed_wr:.0%}"
+        st.caption(caption + (f"  \n{ours}" if ours else ""),
+                   help="Higher = better ban. Smoothed win rate adds average games so small records aren't trusted fully.")
 
 
 # --- sidebar -------------------------------------------------------------------------
@@ -126,16 +170,18 @@ with st.sidebar:
     our_id = st.selectbox("Our team", our_ids, index=our_ids.index(c9.index[0]) if len(c9) else 0,
                           format_func=lambda t: names[t])
     opts = team_options(our_id)
+    opp_ids = list(opts.index)
+    default_opp = opts.index[opts["name"] == DEFAULT_OPPONENT]
     opp_id = st.selectbox(
-        "Opponent", list(opts.index),
+        "Opponent", opp_ids, index=opp_ids.index(default_opp[0]) if len(default_opp) else 0,
         format_func=lambda t: f"{opts.at[t, 'name']}  ({opts.at[t, 'games_vs']} vs us)"
                               + ("" if opts.at[t, "in_league"] else "  - not 2026 LCS"),
         help="2026 LCS teams first, sorted by games played against our team.",
     )
 
     st.header("Recency")
-    n_patches = st.slider("Last N patches", 1, info["n_patches"], info["n_patches"],
-                          help="Counted back from each team's own most recent patch. Max = all data.")
+    n_patches = st.slider("Last N patches", 1, info["n_patches"], min(DEFAULT_LAST_PATCHES, info["n_patches"]),
+                          help="Each team's last N patches with games. Max = all data.")
     last_patches = None if n_patches == info["n_patches"] else n_patches
     half_life = st.slider("Half-life (patches)", 1.0, 10.0, float(A.DEFAULT_BAN_WEIGHTS["half_life"]), 0.5,
                           help="For 'recent' rates and the ban score: a game this many patches old counts half.")
@@ -169,49 +215,76 @@ our_name, opp_name = names[our_id], opts.at[opp_id, "name"]
 # --- header -----------------------------------------------------------------------------
 st.title(f"{our_name} vs {opp_name}")
 h2h, ours, theirs = record(our_id, last_patches, opp_id), record(our_id, last_patches), record(opp_id, last_patches)
+span = window_patches((our_id, opp_id), last_patches)
+span_text = f"Patches {span[0]}–{span[1]}" if span else "No games"
 window = "all data" if last_patches is None else f"each team's last {last_patches} patches"
+st.markdown(f"#### {span_text}")
 st.caption(f"Window: {window}")
 c1, c2, c3 = st.columns(3)
-c1.metric("Head-to-head", wl(h2h), pct_of(h2h) if h2h["games"] else "no meetings in window", delta_color="off")
-c2.metric(f"{our_name} overall", wl(ours), pct_of(ours), delta_color="off")
-c3.metric(f"{opp_name} overall", wl(theirs), pct_of(theirs), delta_color="off")
+c1.metric("Head-to-head", wl(h2h), pct_of(h2h) if h2h["games"] else "no meetings in window", delta_color="off", delta_arrow="off")
+c2.metric(f"{our_name} overall", wl(ours), pct_of(ours), delta_color="off", delta_arrow="off")
+c3.metric(f"{opp_name} overall", wl(theirs), pct_of(theirs), delta_color="off", delta_arrow="off")
 
 tab_scout, tab_vs, tab_plan = st.tabs(["Opponent scouting", "Against us", "Ban plan"])
 
 # --- tab: opponent scouting --------------------------------------------------------------
 with tab_scout:
+    what_this_means(f"these are the champions {opp_name} relies on and grabs early, so expect to face them "
+                    f"and prepare answers for the ones they win with.")
     pool = champion_pool(opp_id, last_patches, half_life)
     st.subheader(f"{opp_name} champion pool")
     if pool.empty:
         st.info("No games in this window.")
     else:
-        role = st.radio("Role", ["all"] + ROLE_ORDER, horizontal=True, key="pool_role")
+        f1, f2 = st.columns([2, 1])
+        role = f1.radio("Role", ["all"] + ROLE_ORDER, horizontal=True, key="pool_role")
+        show_small = f2.checkbox("Show small samples", value=False,
+                                 help=f"Include champions with fewer than {MIN_POOL_GAMES} games")
         shown = pool if role == "all" else pool[pool["role"] == role]
-        top = shown.sort_values(["games", "weighted_pick_rate"], ascending=False).head(15)
-        fig = px.bar(top, x="games", y="champion", color="role", orientation="h", text="record",
-                     color_discrete_map=ROLE_COLORS, category_orders={"champion": list(top["champion"]),
-                                                                      "role": ROLE_ORDER},
-                     hover_data={"win_rate": ":.0%", "weighted_pick_rate": ":.0%", "last_played": True})
-        fig.update_traces(textposition="outside", cliponaxis=False)
-        fig.update_layout(height=60 + 28 * len(top), margin=dict(l=0, r=40, t=10, b=0),
-                          legend=dict(orientation="h", y=1.06, title=None), xaxis_title="games played (label = W-L)",
-                          yaxis_title=None)
-        st.plotly_chart(fig, width="stretch")
-        st.caption(f"Out of {pool['n_team_games'].iloc[0]} {opp_name} games in the window. "
-                   "Roles are inferred (see footer).")
-        st.dataframe(
-            shown, hide_index=True, width="stretch",
-            column_order=["champion", "role", "games", "record", "win_rate", "pick_rate", "weighted_pick_rate",
-                          "last_played", "last_patch", "small_sample"],
-            column_config={
-                "champion": "Champion", "role": "Role (inferred)", "games": "Games", "record": "W-L",
-                "win_rate": st.column_config.ProgressColumn("Win rate", format="percent", min_value=0, max_value=1),
-                "pick_rate": st.column_config.ProgressColumn("Pick rate", format="percent", min_value=0, max_value=1),
-                "weighted_pick_rate": st.column_config.ProgressColumn("Recent pick rate", format="percent",
-                                                                      min_value=0, max_value=1),
-                "last_played": "Last played", "last_patch": "Last patch",
-                "small_sample": st.column_config.CheckboxColumn("Small sample", help=f"< {A.SMALL_SAMPLE} games"),
-            })
+        n_hidden = int((shown["games"] < MIN_POOL_GAMES).sum())
+        if not show_small:
+            shown = shown[shown["games"] >= MIN_POOL_GAMES]
+        shown = shown.sort_values(["games", "weighted_pick_rate"], ascending=False)
+
+        if shown.empty:
+            st.info("No champions with enough games here. Tick 'Show small samples' to see them.")
+        else:
+            top = shown.head(15)
+            fig = px.bar(top, x="games", y="champion", color="role", orientation="h", text="record",
+                         color_discrete_map=ROLE_COLORS,
+                         category_orders={"champion": list(top["champion"]), "role": ROLE_ORDER},
+                         hover_data={"win_rate": ":.0%", "weighted_pick_rate": ":.0%", "last_played": True})
+            fig.update_traces(textposition="outside", cliponaxis=False)
+            fig.update_layout(height=60 + 28 * len(top), margin=dict(l=0, r=40, t=10, b=0),
+                              legend=dict(orientation="h", y=1.06, title=None),
+                              xaxis_title="games played (label = W-L)", yaxis_title=None)
+            st.plotly_chart(fig, width="stretch")
+
+            table = shown.assign(win_rate_bar=shown["win_rate"].map(text_bar),
+                                 pick_rate=shown["pick_rate"] * 100,
+                                 weighted_pick_rate=shown["weighted_pick_rate"] * 100)
+            styled = table.style.apply(
+                lambda row: [f"color: {GREY}" if c == "win_rate_bar" and row["games"] < A.SMALL_SAMPLE else ""
+                             for c in row.index], axis=1)
+            st.dataframe(
+                styled, hide_index=True, width="stretch",
+                column_order=["champion", "role", "games", "record", "win_rate_bar", "pick_rate",
+                              "weighted_pick_rate", "last_played", "last_patch", "small_sample"],
+                column_config={
+                    "champion": "Champion", "role": "Role (inferred)", "games": "Games", "record": "W-L",
+                    "win_rate_bar": st.column_config.TextColumn(
+                        "Win rate", help=f"Greyed out when based on fewer than {A.SMALL_SAMPLE} games"),
+                    "pick_rate": st.column_config.ProgressColumn("Pick rate", format="%.0f%%", min_value=0,
+                                                                 max_value=100),
+                    "weighted_pick_rate": st.column_config.ProgressColumn("Recent pick rate", format="%.0f%%",
+                                                                          min_value=0, max_value=100),
+                    "last_played": "Last played", "last_patch": "Last patch",
+                    "small_sample": st.column_config.CheckboxColumn("Small sample",
+                                                                    help=f"< {A.SMALL_SAMPLE} games"),
+                })
+        st.caption(f"Out of {pool['n_team_games'].iloc[0]} {opp_name} games in the window."
+                   + (f" {n_hidden} champions with fewer than {MIN_POOL_GAMES} games hidden." if n_hidden and not show_small else "")
+                   + " Roles are inferred (see footer).")
 
     st.subheader("Priority picks (first round of picks)")
     pp = priority_picks(opp_id, last_patches, half_life)
@@ -225,14 +298,14 @@ with tab_scout:
             col.info("No games.")
             continue
         col.dataframe(
-            part.head(10), hide_index=True, width="stretch",
+            part.head(10).assign(phase1_rate=part["phase1_rate"].head(10) * 100), hide_index=True, width="stretch",
             column_order=["champion", "very_first_picks", "phase1_picks", "phase1_rate", "record", "small_sample"],
             column_config={
                 "champion": "Champion",
                 "very_first_picks": st.column_config.NumberColumn("Very first pick",
                                                                   help="Times it was their first champion of the draft"),
                 "phase1_picks": st.column_config.NumberColumn("Round-1 picks", help="Picked in slots 7-12"),
-                "phase1_rate": st.column_config.ProgressColumn("Round-1 rate", format="percent", min_value=0, max_value=1),
+                "phase1_rate": st.column_config.ProgressColumn("Round-1 rate", format="%.0f%%", min_value=0, max_value=100),
                 "record": "W-L",
                 "small_sample": st.column_config.CheckboxColumn("Small sample", help=f"< {A.SMALL_SAMPLE} picks"),
             })
@@ -243,6 +316,8 @@ with tab_scout:
 
 # --- tab: against us ----------------------------------------------------------------------
 with tab_vs:
+    what_this_means(f"this shows what {opp_name} fears from {our_name} and what {our_name} has chosen to take "
+                    f"away from them when the two teams met.")
     st.caption(f"Only games between {our_name} and {opp_name}: {h2h['games']} in the window. "
                "Head-to-head samples are small, so read these as hints.")
     left, right = st.columns(2)
@@ -255,6 +330,8 @@ with tab_vs:
 
 # --- tab: ban plan --------------------------------------------------------------------------
 with tab_plan:
+    what_this_means(f"with our five bans, these take away the champions {opp_name} plays most and wins with, "
+                    f"while sparing the ones we want for ourselves.")
     recs = recommend_bans(our_id, opp_id, 5, tuple(sorted(weights.items())), last_patches)
     st.subheader(f"Top 5 bans against {opp_name}")
     if recs.empty:
@@ -262,15 +339,14 @@ with tab_plan:
     else:
         n_opp = int(recs["n_opp_games"].iloc[0])
         st.caption(f"Based on {n_opp} {opp_name} games. Ranking uses the weights in the sidebar.")
-        cards = st.columns(len(recs))
-        for i, (card, r) in enumerate(zip(cards, recs.itertuples())):
-            with card.container(border=True):
-                st.markdown(f"#### {i + 1}. {r.champion}")
-                st.metric("Score", f"{r.score:.2f}")
-                st.markdown(f"**{r.record}** in {int(r.picks)} picks  \nSmoothed WR **{r.smoothed_wr:.0%}**")
-                if r.picks < A.SMALL_SAMPLE:
-                    st.markdown(":orange[Small sample]")
-                st.caption(r.reason)
+        rows = [recs.iloc[:3], recs.iloc[3:]]
+        rank = 1
+        for chunk in rows:
+            cols = st.columns(3)
+            for col, r in zip(cols, chunk.itertuples()):
+                with col:
+                    ban_card(rank, r)
+                rank += 1
         with st.expander("How the score works"):
             st.markdown(
                 "- **Win-rate edge**: how often they pick the champion (recent games count more) times how far "
@@ -285,11 +361,10 @@ with tab_plan:
 
 # --- footer --------------------------------------------------------------------------------
 st.divider()
-win_range = (f"{opp_name}: patches {theirs['first_patch']}-{theirs['last_patch']}" if theirs["games"] else "")
 st.caption(
     f"**Roles are inferred**: the data has no role field. Roles come from roster order in early-2025 events and "
     f"from each player's usual role and champion elsewhere (100% accurate on held-out labelled games). "
     f"**Data**: GRID official match data (Sky's The Limit 2026 hackathon), {info['games']} pro games, "
-    f"patches {info['first_patch']}-{info['last_patch']} ({info['first_date']} to {info['last_date']}). "
-    f"{win_range}"
+    f"patches {info['first_patch']}–{info['last_patch']} ({info['first_date']} to {info['last_date']}). "
+    f"This view: {span_text.lower()}. Text only; no game artwork is used."
 )
