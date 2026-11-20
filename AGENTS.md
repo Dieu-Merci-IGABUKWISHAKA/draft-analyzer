@@ -116,6 +116,13 @@ app/streamlit_app.py (dashboard)    notebooks/01_cloud9_scouting.py (text report
   - **Replication:** `replication` and `replication_summary` re-measure each pattern on later games.
   - **`summary`:** returns only rows whose kind holds up (`insights.holds_up`: kept ≥ 25% and the later gap's 90% interval above zero) and that are confident (≥ 80%).
 
+- **`backtest.py`**: walk-forward backtest of the Ban plan, described in [docs/VALIDATION.md](docs/VALIDATION.md).
+  - **`build_cases`:** the per-game Ban plan inputs, from earlier games only, with Fearless locks. Cached in data_cache.
+  - **Lists:** `plan_lists` uses `analysis.ban_stats` and `ban_scores` (vectorised), compared against naive and meta baselines.
+  - **Metrics and tuning:** `evaluate` measures pick rate, game hits and win checks; `paired_gain` gives bootstrap CIs; `tune` runs a 540-setting grid on 2025.
+  - **Previous weights:** `PREVIOUS_BAN_WEIGHTS` keeps the old hand-set weights for comparison.
+- **`analysis.recommend_bans`** is split into `ban_stats` (slow, weight-independent) and `ban_scores` (cheap). Its output is unchanged.
+
 ### `app/streamlit_app.py`
 
 `st.cache_data` wrappers around the `analysis` functions, then layout only.
@@ -136,7 +143,7 @@ Run it with `python -m streamlit run app/streamlit_app.py`.
 - `notebooks/00_check_data.py`: a smoke test that the data is reachable. It streams one Cloud9 feed.
 - `notebooks/01_cloud9_scouting.py`: a text version of the scouting report.
 - `.idea/runConfigurations/`: shared PyCharm configurations: **Dashboard (Streamlit)**, **Rebuild drafts table**, **Cloud9 scouting report**, **Train draft model**, **Tests**.
-- `docs/AI_WORKFLOW.md` (how the project was built with Claude Code), `docs/SUBMISSION.md` (Devpost text), `docs/MODEL.md` (win-probability model and validation), `docs/SIMULATOR.md` (draft simulator), `docs/INSIGHTS.md` (insight cards and their replication), `docs/MACRO.md` (early-game patterns and their replication), `docs/images/` (screenshots, still to add).
+- `docs/AI_WORKFLOW.md` (how the project was built with Claude Code), `docs/SUBMISSION.md` (Devpost text), `docs/MODEL.md` (win-probability model and validation), `docs/SIMULATOR.md` (draft simulator), `docs/INSIGHTS.md` (insight cards and their replication), `docs/MACRO.md` (early-game patterns and their replication), `docs/VALIDATION.md` (**every validation result in one place**), `docs/images/` (screenshots, still to add).
 - `tests/`: pytest (`python -m pytest`, or the **Tests** run configuration). The tests build a synthetic drafts table, so they run without the licensed data. The real-data leakage test is skipped when the cache is missing. Test data must stay synthetic: never copy GRID rows into a fixture.
 
 ## Existing findings
@@ -172,7 +179,10 @@ From data as of patch 16.17. The README holds the current wording, so keep it in
   - **Everything else fails:** first blood, dragon and herald rates; jungler links for other objectives; all timings.
 - **Feed quirk:** early-2025 feeds have no generic `slayDragon` event, only the drake-type events.
 - **Winner's curse:** in a test draft vs LYON where Cloud9 always took the top-ranked option, the estimate climbed from 40% to 51%. The best of many noisy estimates is too high, so the simulator says so on screen.
-- **Ban score tuning history.** Version 1 over-ranked Nocturne, a champion LYON loses on (44%). Version 2 put LeBlanc (3–0) and Varus (4–0) on top. The fixes were stronger smoothing and `min_picks`. Now Ryze (6–1 in 7 games) outranks Varus (4–0). These weights were set by judgment on all the data, **not** checked on held-out later games (see rule 5).
+- **Ban score tuning history.** Version 1 over-ranked Nocturne, a champion LYON loses on (44%). Version 2 put LeBlanc (3–0) and Varus (4–0) on top. The fixes were stronger smoothing and `min_picks`. Now Ryze (6–1 in 7 games) outranks Varus (4–0). Those hand-set weights were later backtested (Phase 5) and were no better than the league meta in 2026 (26.5% vs 26.9% pick rate).
+  - **Weights tuned on 2025 games are now the defaults:** pick 2, banned_by_others 1, our_pick_penalty 0, min_picks 2.
+  - **2026 result:** 33.8% of the listed, open champions picked, against 19.8% naive and 26.9% meta.
+  - **Against LYON** the top ban is now Varus: 4–0 on a small sample, but banned against LYON in 16 games. "Banned by other teams" turned out to be predictive.
 
 ## Status vs the judges' questions
 
@@ -182,6 +192,7 @@ From data as of patch 16.17. The README holds the current wording, so keep it in
 | Fearless G3, G4, G5 shift | **Built (Phase 2).** The Fearless tab shows games 1 to 5 separately, each with its record and game count. Games with fewer than 5 games are flagged, and games 4–5 carry a caption that they come only from best-of-5 series. The simulator also takes the game number and the champions locked by earlier games. |
 | "How to win" insights | **Built (Phase 3): Insights tab.** "How to beat <opponent>" lists the top 5 cards, with their evidence, Wilson 90% intervals, confidence and sample sizes. It is backed by a replication check on later games, and only kinds of pattern that held up qualify. Self-scouting runs the same analysis on our team, plus how predictable our first picks and bans are. |
 | Live draft win-rate impact | **Built (Phase 2): Draft simulator tab.** It shows our win chance with a 90% band beside Elo only, a chart of how it moved, the top 5 options with their shift, reason and sample sizes, and the opponent's likely next picks with their checked accuracy. It is framed as "what each choice shifts", never as a forecast. It was checked in the browser for LYON and FlyQuest. |
-| Time-based validation | **Done for the win-probability model only** (walk-forward by month, with leakage tests). The role inference was checked by holding out whole events, not later games. The ban-score weights were not validated on held-out games. |
+| Time-based validation | **Done for the model, likely picks, insight and macro patterns, and the Ban plan** (docs/VALIDATION.md). Not time-based: role inference (held out by whole events, not later games). |
 | Early-game macro context | **Built (Phase 4).** Five first objectives per game, with team and time, extracted in the drafts pass. The Opponent scouting tab shows only lines that held up in later games (docs/MACRO.md). Most early-game habits did not. |
+| Ban plan validated | **Done (Phase 5).** Walk-forward backtest with weights tuned on 2025 and tested on 2026. It beats the naive top-5 by +14.0 pts and the league meta by +6.9 pts on pick rate. There's no consistent evidence the listed champions win them more games. See docs/VALIDATION.md and the README "Does it work?" section. |
 | Screenshots and demo video | **Not done.** `docs/images/` is empty, and the video link in the README is a placeholder. |

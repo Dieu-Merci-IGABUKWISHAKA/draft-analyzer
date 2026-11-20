@@ -245,9 +245,9 @@ with st.sidebar:
     weights = {
         "win_rate": st.slider("Win-rate edge", 0.0, 6.0, d["win_rate"], 0.25, key="w_win_rate",
                               help="How much their win rate on a champion matters. Below the pivot it counts against banning."),
-        "pick": st.slider("Pick frequency", 0.0, 2.0, d["pick"], 0.1, key="w_pick",
+        "pick": st.slider("Pick frequency", 0.0, 4.0, d["pick"], 0.1, key="w_pick",
                           help="Credit for how often they play it, regardless of results."),
-        "banned_by_others": st.slider("Banned by other teams", 0.0, 1.0, d["banned_by_others"], 0.05,
+        "banned_by_others": st.slider("Banned by other teams", 0.0, 2.0, d["banned_by_others"], 0.05,
                                       key="w_banned_by_others",
                                       help="Credit if other teams often ban it against them."),
         "our_pick_penalty": st.slider("We play it too (penalty)", 0.0, 1.0, d["our_pick_penalty"], 0.05,

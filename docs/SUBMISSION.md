@@ -56,7 +56,7 @@ We use the final `seriesState.games[].draftActions` of each GRID feed as the sou
 - **Inferred roles:** roles come from 6 early-2025 events whose roster order is top-to-support. Those labels give each champion's and each player's role tendencies, and every other game gets the best one-player-per-role assignment (100% accuracy on held-out labelled events).
 - **Recency:** a game is weighted 0.5^(patches ago / 3) within a last-N-patches window.
 - **Smoothing:** win rates get 10 imaginary games at the team's average.
-- **Ban score:** recent pick rate × 3 × (smoothed win rate − 50%) / 50%, plus 0.25 × how often other teams ban it against them. Positive scores are reduced when we also play the champion. Champions under 4 picks are not ranked.
+- **Ban score:** recent pick rate × (2 + 3 × (smoothed win rate − 50%) / 50%), plus 1 × how often other teams ban it against them. Champions under 2 picks are not ranked. The weights were tuned on 2025 games and backtested on 2026 games: the opponent picked 33.8% of the listed champions left open, against 19.8% for their own top 5 and 26.9% for the league meta (docs/VALIDATION.md).
 - **Fearless detection:** no champion is ever re-picked within any of 568 multi-game series, so every event is hard Fearless. The series planner removes used champions for both teams.
 - **Limitations:** small samples (flagged everywhere), inferred roles, and a handful of games with missing or invalidated drafts, which are excluded and documented.
 

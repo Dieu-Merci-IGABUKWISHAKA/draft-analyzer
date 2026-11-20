@@ -35,6 +35,16 @@ Numbers below are from the data as of patch 16.17. All of them are visible in th
 - **All 20 events use hard Fearless Draft.** In 568 multi-game series, no champion is ever picked twice in a series, by either team. This is detected from the picks, not assumed.
 - **LYON is strongest in game 2 of Fearless series in the last 6 patches**: 11–2 (85%) in game 2 vs 8–5 (62%) in both game 1 and game 3+, with 13 games each. Over all data the gap is smaller (53% / 60% / 59%), so this is a recent trend on a small sample.
 
+## Does it work?
+
+Every claim was tested on games later than the ones used to build it. Full results: [docs/VALIDATION.md](docs/VALIDATION.md).
+
+- **The Ban plan removes champions they actually play.** I backtested it on 439 games from 2026, each with only earlier data and with weights tuned on 2025. Of the champions it lists that a team didn't ban and left available, the opponent picked **33.8%**. That compares with **19.8%** for their own 5 most-picked champions and **26.9%** for the league meta. The gains are +14.0 pts and +6.9 pts (90% CI 12.3–15.7 and 4.9–8.9). Whether those champions also win them more games is not consistent (2025: no; 2026: +2–3 pts).
+- **Their habits predict their next pick.** Across 8,970 picks in 897 games, the actual pick was in our top 5 **44%** of the time, against 37% for the meta alone. For bans it was **38%** against 26%.
+- **Draft habits are stable.** "They take X early" and "they hold Y for the counter-pick" point the same way in later games **82%** of the time.
+- **The draft does not predict the winner beyond team strength.** Team strength (Elo) alone gets 64% right on 897 later games, and adding the draft adds nothing reliable. That's why the simulator shows "what each choice shifts", not a forecast.
+- **What didn't hold up, and isn't shown as advice:** win-rate gaps by side, first pick or Fearless carry-over, and most early-game habits.
+
 ## Screenshots
 
 ![Overview: opponent scouting](docs/images/overview.png)
@@ -107,7 +117,7 @@ score = recent pick rate × (pick + win_rate × edge)
       + banned_by_others × recent rate other teams ban it against them
 positive scores × (1 − our_pick_penalty × our own recent pick rate)
 ```
-Defaults: `win_rate` 3, `pick` 0, `banned_by_others` 0.25, `our_pick_penalty` 0.5, smoothing 10 games, minimum 4 picks. With `pick` = 0, a champion the opponent loses on lowers the score: banning it would only help them.
+Defaults: `win_rate` 3, `pick` 2, `banned_by_others` 1, `our_pick_penalty` 0, smoothing 10 games, minimum 2 picks. They were **tuned on 2025 games and tested on 2026 games** (backtest above). The earlier hand-set weights (`pick` 0, `banned_by_others` 0.25, `our_pick_penalty` 0.5, minimum 4 picks) were no better than the league meta. The win-rate term is signed, so a champion the opponent loses on scores lower.
 
 **Fearless detection.** For each event we count champions re-picked later in the same multi-game series, by any team and by the same team. Zero repeats by any team means hard Fearless. All 20 events have zero, across 568 multi-game series. The series planner applies that rule: a champion used by either team is unavailable to both.
 

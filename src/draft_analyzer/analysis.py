@@ -13,6 +13,7 @@ Recency (optional on most functions):
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from draft_analyzer.drafts import load_drafts
@@ -66,7 +67,7 @@ def team_games(team_id: str, drafts: pd.DataFrame | None = None,
     games["had_first_pick"] = games.index.isin(fp_games)
 
     pidx = games["patch"].astype(str).map(patch_idx)
-    games["patches_ago"] = pidx.max() - pidx if len(games) else pidx
+    games["patches_ago"] = (pidx.max() - pidx) if len(games) else pd.Series(dtype=float, index=games.index)
     if last_patches is not None:
         recent = sorted(pidx.unique())[-last_patches:]
         games = games[pidx.isin(recent)]
@@ -215,52 +216,36 @@ def bans_against(team_id: str, last_patches: int | None = None, half_life: float
     return _bans(team_id, False, last_patches, half_life, drafts, vs)
 
 
-# Tunable knobs for recommend_bans (meant to become dashboard sliders).
+# Tunable knobs for recommend_bans (dashboard sliders). win_rate, pick, banned_by_others,
+# our_pick_penalty and min_picks were tuned walk-forward on 2025 games (backtest.py) and
+# tested on 2026 games: see docs/VALIDATION.md. The hand-set weights they replaced are
+# backtest.PREVIOUS_BAN_WEIGHTS.
 DEFAULT_BAN_WEIGHTS: dict[str, float] = {
     "win_rate": 3.0,          # x pick_rate x win-rate edge over wr_pivot (signed: below the pivot it subtracts)
-    "pick": 0.0,              # x pick_rate, regardless of results (raise to value sheer presence)
-    "banned_by_others": 0.25, # x rate other teams ban it against this opponent
-    "our_pick_penalty": 0.5,  # positive scores x (1 - this x our own pick rate)
+    "pick": 2.0,              # x pick_rate, regardless of results (sheer presence)
+    "banned_by_others": 1.0,  # x rate other teams ban it against this opponent
+    "our_pick_penalty": 0.0,  # positive scores x (1 - this x our own pick rate)
     "wr_pivot": 0.5,          # win rate at which the win-rate term is zero
     "prior_games": 10.0,      # smoothing: imaginary games at the opponent's overall win rate
-    "min_picks": 4,           # ignore champions they picked fewer times than this in the window
+    "min_picks": 2,           # ignore champions they picked fewer times than this in the window
     "half_life": 3.0,         # patches until a game counts half
 }
 
 
-def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict[str, float] | None = None,
-                   drafts: pd.DataFrame | None = None, last_patches: int | None = None,
-                   exclude: set[str] | None = None) -> pd.DataFrame:
-    """Rank champions to ban against an opponent.
+BAN_STAT_COLUMNS = ["champion", "picks", "wins", "w_picks", "recent_picks", "banned_against", "w_banned",
+                    "our_picks", "our_w"]
 
-    edge  = (smoothed_wr - wr_pivot) / wr_pivot          +ve if they win on it, -ve if they lose
-    score = weighted_pick_rate * (pick + win_rate * edge)
-          + banned_by_others * weighted_banned_against_rate
-    positive scores x (1 - our_pick_penalty * our_pick_rate)
 
-    With the default pick=0, a champion the opponent wins under 50% on
-    gets a negative pick term: banning it would take away a champion they
-    do badly with. smoothed_wr adds `prior_games` imaginary games at the
-    opponent's overall win rate, so a 1-0 record isn't treated as 100%.
-    Champions picked fewer than `min_picks` times, or whose champion_id is in
-    `exclude` (e.g. already used in a Fearless series), are not ranked.
-    `weights` overrides any subset of DEFAULT_BAN_WEIGHTS. last_patches limits
-    both teams to their N most recent patches (on top of the half-life decay).
-    """
-    unknown = set(weights or {}) - set(DEFAULT_BAN_WEIGHTS)
-    if unknown:
-        raise ValueError(f"unknown ban weights: {sorted(unknown)}")
-    w = {**DEFAULT_BAN_WEIGHTS, **(weights or {})}
-    half_life, prior_games = w["half_life"], w["prior_games"]
+def ban_stats(our_team_id: str, opponent_id: str, drafts: pd.DataFrame | None = None,
+              last_patches: int | None = None, half_life: float = DEFAULT_BAN_WEIGHTS["half_life"]
+              ) -> tuple[pd.DataFrame, dict]:
+    """The weight-independent part of recommend_bans (the slow part): per champion, the
+    opponent's picks, wins, recency-weighted picks, bans against them and our own picks.
+    Returns (stats indexed by champion_id, context: W, opp_wr, ours_W, games, ours, recent_ids)."""
     df = _drafts(drafts)
     games = team_games(opponent_id, df, last_patches, half_life)
-    cols = ["champion", "score", "picks", "wins", "record", "recent_picks", "smoothed_wr", "wr_edge",
-            "weighted_pick_rate", "banned_against", "our_picks", "n_our_games", "n_opp_games",
-            "reason_lines", "reason"]
     if games.empty:
-        return pd.DataFrame(columns=cols)
-    W = games["weight"].sum()
-    opp_wr = games["won"].mean()
+        return pd.DataFrame(columns=BAN_STAT_COLUMNS), {"games": games}
     recent_ids = set(games.index[games["patch"].astype(str).isin(
         sorted(games["patch"].astype(str).unique(), key=_patch_key)[-RECENT_PATCHES:])])
 
@@ -284,20 +269,64 @@ def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict
     our_picks = our_picks.join(ours[["weight"]], on="game_id").groupby("champion_id").agg(
         our_picks=("game_id", "size"), our_w=("weight", "sum"))
     out = out.join(our_picks).fillna({"our_picks": 0, "our_w": 0})
+    ctx = {"games": games, "ours": ours, "recent_ids": recent_ids, "W": games["weight"].sum(),
+           "opp_wr": games["won"].mean(), "ours_W": ours["weight"].sum() if len(ours) else 0.0}
+    return out[BAN_STAT_COLUMNS], ctx
 
-    out["weighted_pick_rate"] = out["w_picks"] / W
-    out["smoothed_wr"] = (out["wins"] + prior_games * opp_wr) / (out["picks"] + prior_games)
-    out["weighted_banned_against_rate"] = out["w_banned"] / W
-    out["our_pick_rate"] = out["our_w"] / ours["weight"].sum() if len(ours) else 0.0
+
+def ban_scores(stats: pd.DataFrame, ctx: dict, weights: dict[str, float] | None = None) -> pd.DataFrame:
+    """The weight-dependent part of recommend_bans: adds weighted_pick_rate, smoothed_wr,
+    wr_edge, our_pick_rate and score to `stats` (cheap; used to tune the weights)."""
+    w = {**DEFAULT_BAN_WEIGHTS, **(weights or {})}
+    out = stats.copy()
+    out["weighted_pick_rate"] = out["w_picks"] / ctx["W"]
+    out["smoothed_wr"] = (out["wins"] + w["prior_games"] * ctx["opp_wr"]) / (out["picks"] + w["prior_games"])
+    out["weighted_banned_against_rate"] = out["w_banned"] / ctx["W"]
+    ours_W = np.asarray(ctx["ours_W"], dtype=float)      # scalar, or one value per row (backtest)
+    out["our_pick_rate"] = np.divide(out["our_w"].to_numpy(dtype=float), ours_W,
+                                     out=np.zeros(len(out)), where=np.broadcast_to(ours_W, (len(out),)) > 0)
     out["wr_edge"] = (out["smoothed_wr"] - w["wr_pivot"]) / w["wr_pivot"]
     score = (out["weighted_pick_rate"] * (w["pick"] + w["win_rate"] * out["wr_edge"])
              + w["banned_by_others"] * out["weighted_banned_against_rate"])
     out["score"] = score.where(score <= 0, score * (1 - w["our_pick_penalty"] * out["our_pick_rate"]))
+    return out
+
+
+def recommend_bans(our_team_id: str, opponent_id: str, n: int = 5, weights: dict[str, float] | None = None,
+                   drafts: pd.DataFrame | None = None, last_patches: int | None = None,
+                   exclude: set[str] | None = None) -> pd.DataFrame:
+    """Rank champions to ban against an opponent.
+
+    edge  = (smoothed_wr - wr_pivot) / wr_pivot          +ve if they win on it, -ve if they lose
+    score = weighted_pick_rate * (pick + win_rate * edge)
+          + banned_by_others * weighted_banned_against_rate
+    positive scores x (1 - our_pick_penalty * our_pick_rate)
+
+    The win-rate term is signed: a champion the opponent wins under 50% on
+    scores lower (with pick=0 it would go negative). smoothed_wr adds `prior_games` imaginary games at the
+    opponent's overall win rate, so a 1-0 record isn't treated as 100%.
+    Champions picked fewer than `min_picks` times, or whose champion_id is in
+    `exclude` (e.g. already used in a Fearless series), are not ranked.
+    `weights` overrides any subset of DEFAULT_BAN_WEIGHTS. last_patches limits
+    both teams to their N most recent patches (on top of the half-life decay).
+    Backtested walk-forward in backtest.py (docs/VALIDATION.md).
+    """
+    unknown = set(weights or {}) - set(DEFAULT_BAN_WEIGHTS)
+    if unknown:
+        raise ValueError(f"unknown ban weights: {sorted(unknown)}")
+    w = {**DEFAULT_BAN_WEIGHTS, **(weights or {})}
+    cols = ["champion", "score", "picks", "wins", "record", "recent_picks", "smoothed_wr", "wr_edge",
+            "weighted_pick_rate", "banned_against", "our_picks", "n_our_games", "n_opp_games",
+            "reason_lines", "reason"]
+    stats, ctx = ban_stats(our_team_id, opponent_id, drafts, last_patches, w["half_life"])
+    if ctx["games"].empty:
+        return pd.DataFrame(columns=cols)
+    out = ban_scores(stats, ctx, w)
     out = out[(out["picks"] >= w["min_picks"]) & ~out.index.isin(list(exclude or ()))]
     if out.empty:
         return pd.DataFrame(columns=cols)
 
-    n_games, n_recent = len(games), len(recent_ids)
+    n_games, ours = len(ctx["games"]), ctx["ours"]
 
     def reason_lines(r) -> list[str]:
         """Short plain-English lines; the last (optional) one is about our own use of it."""
