@@ -1,0 +1,48 @@
+# --- Sky's The Limit 2026 hackathon data: licensed, must not be committed ---
+stl-hackathon-2026-grid-starter/
+*.zst
+*.jsonl
+*.parquet
+*.sqlite
+*.duckdb
+data_cache/
+
+# --- PyCharm: commit .idea/ (hackathon proof), but not per-user state ---
+.idea/workspace.xml
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Testing / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment files
+.env
+
+# Streamlit local secrets
+.streamlit/secrets.toml
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
