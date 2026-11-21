@@ -14,7 +14,7 @@ I'm a final-year Electrical Engineering student from Rwanda, and I'm doing the A
 
 One honest negative result: the draft does not predict *who wins* beyond team strength. That's why the simulator shows what each choice shifts, never a forecast. Every number is in [docs/VALIDATION.md](docs/VALIDATION.md).
 
-**Demo video:** https://youtu.be/vy8vl4YwBAo
+**Demo video (2:47):** https://youtu.be/vy8vl4YwBAo
 
 ## Features
 
