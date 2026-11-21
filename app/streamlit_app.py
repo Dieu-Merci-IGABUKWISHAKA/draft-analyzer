@@ -2,7 +2,7 @@
 
 Run:  python -m streamlit run app/streamlit_app.py
 
-All numbers come from draft_analyzer.analysis; this file only lays them out.
+All numbers come from the draft_analyzer package; this file only lays them out.
 Text only: no game artwork or champion images.
 """
 

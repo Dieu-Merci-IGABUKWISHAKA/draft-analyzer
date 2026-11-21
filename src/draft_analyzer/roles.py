@@ -72,8 +72,9 @@ def _assign(group: pd.DataFrame, player_p: dict, champ_p: dict) -> list[str]:
             for p, c in zip(group["player_id"], group["character_id"], strict=False)
         ]
     )
-    # A rare glitched roster lists 6 players with champions: extra players can
-    # take a "no role" column at a high cost, so it's used only if needed.
+    # A rare glitched roster lists 6 players with champions. Extra "no role" columns
+    # let the leftover player be assigned somewhere; they score very low, so they
+    # are used only when there is no other choice.
     n_extra = max(0, len(group) - len(ROLES))
     scores = np.hstack([scores, np.full((len(group), n_extra), np.log(1e-4))])
     best, best_score = None, -np.inf

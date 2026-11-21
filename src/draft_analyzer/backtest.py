@@ -43,9 +43,9 @@ TUNE_START, TEST_START = "2025-01-01", "2026-01-01"
 LAST_PATCHES = 6  # dashboard default window
 MIN_PRIOR_GAMES = 10  # the scouted team needs this many games in its window
 N = 5
-# A first grid (pick up to 2, banned_by_others up to 1, prior_games 5/10/20) put the 2025 best
-# on its edge, with prior_games making < 0.2 pts of difference; so the grid was widened and
-# prior_games fixed at 10. Both decisions used 2025 games only.
+# The first grid (pick up to 2, banned_by_others up to 1, prior_games 5/10/20) found its
+# best 2025 setting on the grid's edge, and prior_games changed the result by < 0.2 pts.
+# So the grid was widened and prior_games fixed at 10. Both decisions used 2025 games only.
 GRID = {
     "win_rate": [0.0, 1.0, 3.0],
     "pick": [0.0, 0.5, 1.0, 2.0, 4.0, 8.0],

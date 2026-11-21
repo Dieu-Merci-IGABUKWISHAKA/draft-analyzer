@@ -41,9 +41,10 @@ PHASE1_BASE = 0.6  # 6 of a draft's 10 picks are in phase 1
 TELL_HIGH, TELL_LOW = 0.85, 0.30  # "always early" / "held for counter-pick" phase-1 shares
 MIN_PRED_GAMES = 15  # games needed to compare a team's predictability with the league
 DEFAULT_PATCHES = 12
-# "How to beat" only lists cards that are at least MIN_CONFIDENCE confident and whose type,
-# among its cards that confident, kept at least MIN_RELIABILITY of its gap in later games
-# (replication_summary). Set after seeing the replication results (see docs/INSIGHTS.md).
+# A card reaches "How to beat" only if it is at least MIN_CONFIDENCE confident, and its kind
+# of pattern kept at least MIN_RELIABILITY of its gap in later games (counting only that
+# kind's confident cards; see replication_summary). Both were set after seeing the
+# replication results (docs/INSIGHTS.md).
 MIN_RELIABILITY = 0.25
 MIN_CONFIDENCE = 0.80
 
